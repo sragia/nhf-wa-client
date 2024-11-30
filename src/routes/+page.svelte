@@ -55,6 +55,13 @@
     font-style: normal;
   }
 
+  h1 {
+    margin: 0;
+    color: #EBEBD3;
+    text-align: center;
+    font-size: 24px;
+  }
+
   .container {
     height: 100%;
     display: flex;
@@ -66,8 +73,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    margin: 8px 0;
-    width: 300px;
+    margin: 4px 0;
   }
 
   .input input {
@@ -99,17 +105,23 @@
     gap: 8px;
   }
 
+  input {
+    border-radius: 5px;
+    border: transparent;
+  }
+
   button {
-    background: #2e2e2e;
+    background: #5899E2;
     color: #ebebd3;
+    padding: 8px 16px;
     font-weight: 600;
-    margin: 8px 0;
+    margin: 16px 0;
     border: transparent;
     border-radius: 5px;
   }
 
   button:hover,
   button:active {
-    background: #4e00c2;
+    background: #65AFFF;
   }
 </style>
