@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    nhf_weakauras_lib::run()
+    nhf_weakauras_lib::run
+()
 }
