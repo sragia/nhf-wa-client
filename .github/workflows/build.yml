@@ -45,9 +45,10 @@ jobs:
         - uses: tauri-apps/tauri-action@v0
           env:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            PUBLIC_SERVER_HOST: ${{ secrets.PUBLIC_SERVER_HOST }}
           with:
-            tagName: v__VERSION__
-            releaseName: 'NHF WeakAuras v__VERSION__'
+            tagName: __VERSION__
+            releaseName: 'NHF Aura Manager __VERSION__'
             releaseBody: 'See the assets to download this version and install.'
             releaseDraft: true
             prerelease: false
