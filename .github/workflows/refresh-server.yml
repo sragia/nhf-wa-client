@@ -11,4 +11,4 @@ jobs:
 
     steps:
       - name: Refresh Server
-        run: bash curl https://nhfmanager.sragia.com/refresh
+        run: curl https://nhfmanager.sragia.com/refresh
