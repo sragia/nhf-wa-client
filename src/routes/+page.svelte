@@ -104,10 +104,10 @@
       let downloaded = 0;
       let contentLength = 0;
       // alternatively we could also call update.download() and update.install() separately
-      // await update.downloadAndInstall();
+      await update.downloadAndInstall();
 
       console.log('update installed');
-      // await relaunch();
+      await relaunch();
     }    
   }
 
