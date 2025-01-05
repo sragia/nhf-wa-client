@@ -118,7 +118,7 @@
   <h1>NHF Aura Manager</h1>
   <div class="container">
     <div class="input">
-      <label for="wow_folder">WoW Folder (ex. .../World of Warcraft/_retail_)</label>
+      <label for="wow_folder">WoW Folder (i.e. .../World of Warcraft/_retail_)</label>
       <input onclick={openFolder} name="folder" id="wow_folder" bind:value={wowFolder} />
     </div>
     <button type="button" disabled={!wowFolder || isInstalling} class:glowing={isUpdateAvailable} onclick={update}>{installStateText}</button>
