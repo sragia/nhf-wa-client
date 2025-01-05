@@ -30,14 +30,6 @@ const getCurrentAddonVersion = async () => {
             const storedFolder = await store.get('wow_folder');
             if (storedFolder) {
                 const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NHFAuraManager/NHFAuraManager.toc' });
-                // const file = await open('Interface/Addons/NHFAuraManager/NHFAuraManager.toc',{
-                //     read: true,
-                //     baseDir: storedFolder
-                // });
-                // const buf = new Uint8Array();
-                // await file.read(buf);
-                // const textContents = new TextDecoder().decode(buf);
-                // console.log(textContents);
                 const versionMatch = file.match(/## Version:\s*(\S+)/);
                 if (versionMatch) {   
                     return versionMatch[1];
