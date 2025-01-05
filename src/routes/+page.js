@@ -31,7 +31,7 @@ const getCurrentAddonVersion = async () => {
             if (storedFolder) {
                 const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NHFAuraManager/NHFAuraManager.toc' });
                 const versionMatch = file.match(/## Version:\s*(\S+)/);
-                if (versionMatch) {   
+                if (versionMatch) {
                     return versionMatch[1];
                 }
             }
