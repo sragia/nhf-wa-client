@@ -27,11 +27,23 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI2MTI1MjkzNTdGRjYxNQpSV1FWOW44MUtTVmhBdm1ROWx5eGc2aFd4OVpBTUFsNkxRajJtYTZKMWlOVnQ5N0VNbXplY2ZpLwo=",
+      "endpoints": [
+        "https://nhfmanager.sragia.com/clientupdate?version={{current_version}}"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

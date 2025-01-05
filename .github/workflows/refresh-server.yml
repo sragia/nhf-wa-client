@@ -1,0 +1,14 @@
+name: Refresh Server
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  refresh-server:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Refresh Server
+        run: bash curl https://nhfmanager.sragia.com/refresh

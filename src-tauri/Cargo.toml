@@ -1,5 +1,5 @@
 [package]
-name = "NHF Aura Manager"
+name = "nhf-aura-manager"
 version = "0.1.0"
 description = "Aura Manager"
 authors = ["Exality"]
@@ -27,5 +27,8 @@ tauri-plugin-store = "2"
 tauri-plugin-upload = "2"
 zip = "2.2.2"
 tauri-plugin-fs = "2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
 
 
