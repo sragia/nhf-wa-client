@@ -4,9 +4,11 @@
   import { download } from '@tauri-apps/plugin-upload';
   import { PUBLIC_SERVER_HOST } from "$env/static/public";
   import { invoke } from '@tauri-apps/api/core';
+  import { check as clientCheck } from '@tauri-apps/plugin-updater';
+  import { relaunch } from '@tauri-apps/plugin-process';
 
   let wowFolder = $state('');
-  let installStateText = $state('Re-Install');
+  let installStateText = $state('Re-Install Addon');
   let isInstalling = $state(false);
   let isUpdateAvailable = $state(false);
   let store: any = null;
@@ -14,7 +16,7 @@
   const check = async () => {
     const addon = await data.addon;
     if ( !addon.isCurrent && installStateText !== 'Set WoW Folder' ) {
-      installStateText = 'Update Available';
+      installStateText = 'Update Addon';
       isUpdateAvailable = true;
     }
   }
@@ -43,14 +45,14 @@
     if (folder) {
       store.set('wow_folder', folder);
       wowFolder = folder
-      installStateText = 'Re-Install';
+      installStateText = 'Re-Install Addon';
       window.location.reload();
     }
   }
 
   const resetInstallBtnText = () => {
     setTimeout(() => {
-        installStateText = 'Re-Install';
+        installStateText = 'Re-Install Addon';
         isInstalling = false;
         isUpdateAvailable = false;
       }, 4000)
@@ -95,6 +97,20 @@
       resetInstallBtnText();
     }
   }
+
+  const updateClient = async () => {
+    const update = await clientCheck();
+    if (update) {
+      let downloaded = 0;
+      let contentLength = 0;
+      // alternatively we could also call update.download() and update.install() separately
+      // await update.downloadAndInstall();
+
+      console.log('update installed');
+      // await relaunch();
+    }    
+  }
+
 </script>
 
 <meta http-equiv="refresh" content="900">
@@ -106,6 +122,15 @@
       <input onclick={openFolder} name="folder" id="wow_folder" bind:value={wowFolder} />
     </div>
     <button type="button" disabled={!wowFolder || isInstalling} class:glowing={isUpdateAvailable} onclick={update}>{installStateText}</button>
+    {#await data.client}
+      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+    {:then client}
+      {#if !client.isCurrent}
+        <button class="clientupdate glowing" onclick={updateClient}>Update Client</button>
+      {:else}
+        <button class="clientupdate noanim" disabled>Client Up To Date</button>
+      {/if}
+    {/await}
     <div class="bottom">
       {#await data.addon}
         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
@@ -169,7 +194,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    margin: 4px 0;
+    margin: 4px 0 0;
   }
 
   .input input {
@@ -225,13 +250,17 @@
     position: relative;
     padding: 8px 16px;
     font-weight: 600;
-    margin: 16px 0;
+    margin: 8px 0 0;
     border: transparent;
     border-radius: 5px;
   }
 
+  button.clientupdate {
+    margin-bottom: 8px;
+  }
+
   button.glowing,
-  button:disabled {
+  button:not(.noanim):disabled {
     background: #fefefe;
     color: #1e1e1e;
   }
@@ -272,7 +301,11 @@
   }
 
   button.glowing:before, 
-  button:disabled:before {
+  button:not(.noanim):disabled:before {
       opacity: 1;
+  }
+
+  button.noanim:disabled {
+    background: #009632;
   }
 </style>
