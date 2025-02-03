@@ -12,6 +12,12 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn extract_zip(file_path: String, destination: String) -> Result<(), String> {
+    let destination_path = Path::new(&destination);
+
+    if !destination_path.exists() {
+        return Err("Addon Folder does not exist".to_string());
+    }
+
     let file = File::open(file_path).map_err(|e| e.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {

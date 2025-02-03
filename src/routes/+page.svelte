@@ -50,11 +50,17 @@
     }
   }
 
-  const resetInstallBtnText = () => {
+  const resetInstallBtnText = (failed = false) => {
     setTimeout(() => {
-        installStateText = 'Re-Install Addon';
-        isInstalling = false;
-        isUpdateAvailable = false;
+        if (failed) {
+          installStateText = 'Update Addon';
+          isInstalling = false;
+          isUpdateAvailable = true;
+        } else {
+          installStateText = 'Re-Install Addon';
+          isInstalling = false;
+          isUpdateAvailable = false;
+        }
       }, 4000)
   }
 
@@ -69,8 +75,8 @@
       resetInstallBtnText();
       window.location.reload();
     } catch (error) {
-      installStateText = 'Failed Extracting';
-      resetInstallBtnText();
+      installStateText = error;
+      resetInstallBtnText(true);
       console.error(error);
     }
   }
