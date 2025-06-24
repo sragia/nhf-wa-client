@@ -8,6 +8,7 @@
   import { relaunch } from '@tauri-apps/plugin-process';
 
   let wowFolder = $state('');
+  let apiKey = $state('');
   let installStateText = $state('Re-Install Addon');
   let isInstalling = $state(false);
   let isUpdateAvailable = $state(false);
@@ -26,10 +27,15 @@
     store = await load('store.json');
     if (store) {
       const storedFolder = await store.get('wow_folder');
+      const storedApiKey = await store.get('api_key');
       if (storedFolder) {
         wowFolder = storedFolder
       } else {
         installStateText = 'Set WoW Folder';
+      }
+
+      if (storedApiKey) {
+        apiKey = storedApiKey
       }
     } 
   }
@@ -96,6 +102,8 @@
         }
         timer = setTimeout(() => { extract() }, 1000)
         console.log(progress.progress, progress.progressTotal, progress.transferSpeed, progress)
+      }, {
+          "Authorization": apiKey
       })
     } catch (error) {
       isInstalling = false
@@ -104,13 +112,26 @@
     }
   }
 
+  const updateKey = async () => {
+    if (!store) return;
+    await store.set('api_key', apiKey);
+    window.location.reload();
+  }
+
   const updateClient = async () => {
-    const update = await clientCheck();
+    const update = await clientCheck({
+      headers: {
+        "Authorization": apiKey
+      }
+    });
     if (update) {
       let downloaded = 0;
       let contentLength = 0;
-      // alternatively we could also call update.download() and update.install() separately
-      await update.downloadAndInstall();
+      await update.downloadAndInstall(undefined, {
+        headers: {
+          "Authorization": apiKey
+        }
+      });
 
       console.log('update installed');
       await relaunch();
@@ -126,6 +147,10 @@
     <div class="input">
       <label for="wow_folder">WoW Folder (i.e. .../World of Warcraft/_retail_)</label>
       <input onclick={openFolder} name="folder" id="wow_folder" bind:value={wowFolder} />
+    </div>
+    <div class="input">
+      <label for="api_key">API Key (Get From Discord)</label>
+      <input name="api_key" id="api_key" bind:value={apiKey} onchange={updateKey} />
     </div>
     <button type="button" disabled={!wowFolder || isInstalling} class:glowing={isUpdateAvailable} onclick={update}>{installStateText}</button>
     {#await data.client}

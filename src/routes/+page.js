@@ -44,13 +44,27 @@ const getCurrentAddonVersion = async () => {
 }
 
 export const load = async ({ fetch }) => {
-    const latestClient = fetch(PUBLIC_SERVER_HOST + "/getLatestClient")
+    const store = await loadStore('store.json');
+    const apiKey = await store?.get('api_key');
+    const latestClient = fetch(PUBLIC_SERVER_HOST + "/getLatestClient", {
+        headers: {
+            "Authorization": apiKey
+        }
+    })
         .then(response => response.json())
-    const latestAddon = fetch(PUBLIC_SERVER_HOST + "/getLatestAddon")
+    const latestAddon = fetch(PUBLIC_SERVER_HOST + "/getLatestAddon", {
+        headers: {
+            "Authorization": apiKey
+        }
+    })
         .then(response => response.json())
     return {
         isServerUp: new Promise((resolve) => {
-            fetch(PUBLIC_SERVER_HOST + "/ping")
+            fetch(PUBLIC_SERVER_HOST + "/ping", {
+                headers: {
+                    "Authorization": apiKey
+                }
+            })
             .then(() => resolve(true))
             .catch(() => resolve(false));
         }),
