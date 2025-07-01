@@ -1,6 +1,7 @@
 import { PUBLIC_SERVER_HOST } from "$env/static/public";
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from "@tauri-apps/api/core";
+import { resolve } from "@tauri-apps/api/path";
 import { load as loadStore } from '@tauri-apps/plugin-store';
 
 const compareVersions = (version1, version2) => {
@@ -30,6 +31,26 @@ const getCurrentAddonVersion = async () => {
             const storedFolder = await store.get('wow_folder');
             if (storedFolder) {
                 const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NHFAuraManager/NHFAuraManager.toc' });
+                const versionMatch = file.match(/## Version:\s*(\S+)/);
+                if (versionMatch) {
+                    return versionMatch[1];
+                }
+            }
+        }
+    } catch (error) {
+        console.error(error)
+    }
+
+    return false;
+}
+
+const getCurrentNSRaidToolsVersion = async () => {
+    const store = await loadStore('store.json');
+    try {
+        if (store) {
+            const storedFolder = await store.get('wow_folder');
+            if (storedFolder) {
+                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NorthernSkyRaidTools/NorthernSkyRaidTools.toc' });
                 const versionMatch = file.match(/## Version:\s*(\S+)/);
                 if (versionMatch) {
                     return versionMatch[1];
@@ -114,5 +135,32 @@ export const load = async ({ fetch }) => {
                 })
             })
         }),
+        nsRaidTools: new Promise((resolve) => {
+            fetch('https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest')
+            .then(response => response.json())
+            .then(data => {
+                const resolvedData = {isCurrent: false, currentVersion: 'N/A', isActive: true};
+                getCurrentNSRaidToolsVersion().then((currentVersion) => {
+                    if (!currentVersion) {
+                        resolvedData.isCurrent = false;
+                        resolvedData.currentVersion = 'N/A';
+                    } else {
+                        resolvedData.currentVersion = currentVersion;
+                        resolvedData.isCurrent = compareVersions(data.tag_name, currentVersion) === 0;
+                    }
+
+                    resolve(resolvedData);
+                }).catch((error) => {
+                    console.error(error);
+                    getCurrentNSRaidToolsVersion().then((currentVersion) => {
+                        resolve({
+                            isActive: false,
+                            isCurrent: false,
+                            currentVersion: currentVersion || 'N/A'
+                        })
+                    })
+                })
+            })
+        })
     };
 }
