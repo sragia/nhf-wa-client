@@ -195,11 +195,7 @@
     if (update) {
       let downloaded = 0;
       let contentLength = 0;
-      await update.downloadAndInstall(undefined, {
-        headers: {
-          "Authorization": apiKey
-        }
-      });
+      await update.downloadAndInstall();
 
       console.log('update installed');
       await relaunch();
