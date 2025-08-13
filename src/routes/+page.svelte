@@ -94,8 +94,42 @@
       }, 4000)
   }
 
+  const getZipInfo = async (filePath: string) => {
+    try {
+      const info = await invoke('get_zip_info', { filePath });
+      return info;
+    } catch (error: any) {
+      return `Error getting ZIP info: ${error}`;
+    }
+  };
+
   const extract = async () => {
     try {
+      installStateText = 'Validating ZIP...';
+      
+      // Validate ZIP file before extraction
+      try {
+        await invoke('validate_zip', {
+          filePath: './addon.zip'
+        });
+      } catch (validationError: any) {
+        // Get detailed ZIP information to help troubleshoot
+        const zipInfo = await getZipInfo('./addon.zip');
+        installStateText = `ZIP validation failed: ${validationError}`;
+        console.error('ZIP validation error:', validationError);
+        console.log('ZIP file details:', zipInfo);
+        
+        // Show more helpful error message
+        if (validationError.includes('Could not find EOCD')) {
+          installStateText = 'ZIP file is corrupted or incomplete. Please try downloading again.';
+        } else if (validationError.includes('Invalid ZIP file')) {
+          installStateText = 'ZIP file appears to be corrupted. Please try downloading again.';
+        }
+        
+        resetInstallBtnText(true);
+        return;
+      }
+      
       installStateText = 'Extracting...';
       await invoke ('extract_zip', {
         filePath: './addon.zip',
@@ -104,7 +138,7 @@
       installStateText = 'Done';
       resetInstallBtnText();
       window.location.reload();
-    } catch (error) {
+    } catch (error: any) {
       installStateText = error;
       resetInstallBtnText(true);
       console.error(error);
@@ -126,9 +160,7 @@
         }
         timer = setTimeout(() => { extract() }, 1000)
         console.log(progress.progress, progress.progressTotal, progress.transferSpeed, progress)
-      }, {
-          "Authorization": apiKey
-      })
+      }, new Map([["Authorization", apiKey]]))
     } catch (error) {
       isInstalling = false
       installStateText = 'Failed Downloading';
@@ -138,6 +170,31 @@
 
   const extractNSRaidTools = async () => {
     try {
+      nsInstallStateText = 'Validating ZIP...';
+      
+      // Validate ZIP file before extraction
+      try {
+        await invoke('validate_zip', {
+          filePath: './nsRaidTools.zip'
+        });
+      } catch (validationError: any) {
+        // Get detailed ZIP information to help troubleshoot
+        const zipInfo = await getZipInfo('./nsRaidTools.zip');
+        nsInstallStateText = `ZIP validation failed: ${validationError}`;
+        console.error('ZIP validation error:', validationError);
+        console.log('ZIP file details:', zipInfo);
+        
+        // Show more helpful error message
+        if (validationError.includes('Could not find EOCD')) {
+          nsInstallStateText = 'ZIP file is corrupted or incomplete. Please try downloading again.';
+        } else if (validationError.includes('Invalid ZIP file')) {
+          nsInstallStateText = 'ZIP file appears to be corrupted. Please try downloading again.';
+        }
+        
+        resetNSInstallBtnText(true);
+        return;
+      }
+      
       nsInstallStateText = 'Extracting...';
       await invoke ('extract_zip', {
         filePath: './nsRaidTools.zip',
@@ -146,7 +203,7 @@
       nsInstallStateText = 'Done';
       resetNSInstallBtnText();
       window.location.reload();
-    } catch (error) {
+    } catch (error: any) {
       nsInstallStateText = error;
       resetNSInstallBtnText(true);
       console.error(error);
