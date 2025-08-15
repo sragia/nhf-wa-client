@@ -3,31 +3,39 @@
   import { load } from '@tauri-apps/plugin-store';
   import { download } from '@tauri-apps/plugin-upload';
   import { PUBLIC_SERVER_HOST } from "$env/static/public";
-  import { invoke } from '@tauri-apps/api/core';
   import { check as clientCheck } from '@tauri-apps/plugin-updater';
   import { relaunch } from '@tauri-apps/plugin-process';
+  import { getZipInfo, validateAndExtractZip } from './addonService';
 
   let wowFolder = $state('');
   let apiKey = $state('');
-  let installStateText = $state('Re-Install Addon');
-  let nsInstallStateText = $state('Re-Install NS Raid Tools');
   let isInstalling = $state(false);
   let isNSInstalling = $state(false);
   let isUpdateAvailable = $state(false);
   let isNSUpdateAvailable = $state(false);
   let store: any = null;
 
+  function getAddonButtonText() {
+    return !wowFolder ? 'Set WoW Folder'
+      : !apiKey ? 'Set API Key'
+      : isInstalling ? 'Downloading...'
+      : isUpdateAvailable ? 'Update Addon'
+      : 'Re-Install Addon';
+  }
+
+  function getNSButtonText() {
+    return !wowFolder ? 'Set WoW Folder'
+      : !apiKey ? 'Set API Key'
+      : isNSInstalling ? 'Downloading...'
+      : isNSUpdateAvailable ? 'Update NS Raid Tools'
+      : 'Re-Install NS Raid Tools';
+  }
+
   const check = async () => {
     const addon = await data.addon;
     const nsRaidTools = await data.nsRaidTools;
-    if ( !addon.isCurrent && installStateText !== 'Set WoW Folder' ) {
-      installStateText = 'Update Addon';
-      isUpdateAvailable = true;
-    }
-    if ( !nsRaidTools.isCurrent && nsInstallStateText !== 'Set WoW Folder' ) {
-      nsInstallStateText = 'Update NS Raid Tools';
-      isNSUpdateAvailable = true;
-    }
+    isUpdateAvailable = !addon.isCurrent;
+    isNSUpdateAvailable = !nsRaidTools.isCurrent;
   }
   check();
 
@@ -38,11 +46,7 @@
       const storedApiKey = await store.get('api_key');
       if (storedFolder) {
         wowFolder = storedFolder
-      } else {
-        installStateText = 'Set WoW Folder';
-        nsInstallStateText = 'Set WoW Folder';
       }
-
       if (storedApiKey) {
         apiKey = storedApiKey
       }
@@ -60,96 +64,29 @@
     if (folder) {
       store.set('wow_folder', folder);
       wowFolder = folder
-      installStateText = 'Re-Install Addon';
-      nsInstallStateText = 'Re-Install NS Raid Tools';
       window.location.reload();
     }
   }
 
   const resetInstallBtnText = (failed = false) => {
     setTimeout(() => {
-        if (failed) {
-          installStateText = 'Update Addon';
-          isInstalling = false;
-          isUpdateAvailable = true;
-        } else {
-          installStateText = 'Re-Install Addon';
-          isInstalling = false;
-          isUpdateAvailable = false;
-        }
+        isInstalling = false;
+        isUpdateAvailable = failed;
       }, 4000)
   }
 
   const resetNSInstallBtnText = (failed = false) => {
     setTimeout(() => {
-        if (failed) {
-          nsInstallStateText = 'Update NS Raid Tools';
-          isNSInstalling = false;
-          isNSUpdateAvailable = true;
-        } else {
-          nsInstallStateText = 'Re-Install NS Raid Tools';
-          isNSInstalling = false;
-          isNSUpdateAvailable = false;
-        }
+        isNSInstalling = false;
+        isNSUpdateAvailable = failed;
       }, 4000)
   }
 
-  const getZipInfo = async (filePath: string) => {
-    try {
-      const info = await invoke('get_zip_info', { filePath });
-      return info;
-    } catch (error: any) {
-      return `Error getting ZIP info: ${error}`;
-    }
-  };
-
-  const extract = async () => {
-    try {
-      installStateText = 'Validating ZIP...';
-      
-      // Validate ZIP file before extraction
-      try {
-        await invoke('validate_zip', {
-          filePath: './addon.zip'
-        });
-      } catch (validationError: any) {
-        // Get detailed ZIP information to help troubleshoot
-        const zipInfo = await getZipInfo('./addon.zip');
-        installStateText = `ZIP validation failed: ${validationError}`;
-        console.error('ZIP validation error:', validationError);
-        console.log('ZIP file details:', zipInfo);
-        
-        // Show more helpful error message
-        if (validationError.includes('Could not find EOCD')) {
-          installStateText = 'ZIP file is corrupted or incomplete. Please try downloading again.';
-        } else if (validationError.includes('Invalid ZIP file')) {
-          installStateText = 'ZIP file appears to be corrupted. Please try downloading again.';
-        }
-        
-        resetInstallBtnText(true);
-        return;
-      }
-      
-      installStateText = 'Extracting...';
-      await invoke ('extract_zip', {
-        filePath: './addon.zip',
-        destination: wowFolder + '/Interface/Addons'
-      });
-      installStateText = 'Done';
-      resetInstallBtnText();
-      window.location.reload();
-    } catch (error: any) {
-      installStateText = error;
-      resetInstallBtnText(true);
-      console.error(error);
-    }
-  }
-
+  // --- Addon ZIP update logic ---
   const update = async () => {
-    if (!wowFolder || isInstalling) return;
+    if (!wowFolder || !apiKey || isInstalling) return;
     try {
       isInstalling = true
-      installStateText = 'Downloading...';
       let timer: number|null = null;
       await download(
         PUBLIC_SERVER_HOST + "/assets/addon.zip", 
@@ -158,63 +95,31 @@
         if (timer) {
           clearTimeout(timer);
         }
-        timer = setTimeout(() => { extract() }, 1000)
+        timer = setTimeout(() => { extractAddonZip() }, 1000)
         console.log(progress.progress, progress.progressTotal, progress.transferSpeed, progress)
       }, new Map([["Authorization", apiKey]]))
     } catch (error) {
       isInstalling = false
-      installStateText = 'Failed Downloading';
-      resetInstallBtnText();
+      resetInstallBtnText(true);
     }
   }
 
-  const extractNSRaidTools = async () => {
+  async function extractAddonZip() {
     try {
-      nsInstallStateText = 'Validating ZIP...';
-      
-      // Validate ZIP file before extraction
-      try {
-        await invoke('validate_zip', {
-          filePath: './nsRaidTools.zip'
-        });
-      } catch (validationError: any) {
-        // Get detailed ZIP information to help troubleshoot
-        const zipInfo = await getZipInfo('./nsRaidTools.zip');
-        nsInstallStateText = `ZIP validation failed: ${validationError}`;
-        console.error('ZIP validation error:', validationError);
-        console.log('ZIP file details:', zipInfo);
-        
-        // Show more helpful error message
-        if (validationError.includes('Could not find EOCD')) {
-          nsInstallStateText = 'ZIP file is corrupted or incomplete. Please try downloading again.';
-        } else if (validationError.includes('Invalid ZIP file')) {
-          nsInstallStateText = 'ZIP file appears to be corrupted. Please try downloading again.';
-        }
-        
-        resetNSInstallBtnText(true);
-        return;
-      }
-      
-      nsInstallStateText = 'Extracting...';
-      await invoke ('extract_zip', {
-        filePath: './nsRaidTools.zip',
-        destination: wowFolder + '/Interface/Addons'
-      });
-      nsInstallStateText = 'Done';
-      resetNSInstallBtnText();
+      await validateAndExtractZip('./addon.zip', wowFolder + '/Interface/Addons');
+      resetInstallBtnText();
       window.location.reload();
     } catch (error: any) {
-      nsInstallStateText = error;
-      resetNSInstallBtnText(true);
+      resetInstallBtnText(true);
       console.error(error);
     }
   }
 
+  // --- NS Raid Tools ZIP update logic ---
   const updateNSRaidTools = async () => {
-    if (!wowFolder || isNSInstalling) return;
+    if (!wowFolder || !apiKey || isNSInstalling) return;
     try {
       isNSInstalling = true
-      nsInstallStateText = 'Downloading...';
       const response = await fetch('https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest')
       const nsData = await response.json();
       const asset = nsData.assets.find((asset: any) => asset.content_type === 'application/zip');
@@ -227,13 +132,23 @@
         if (timer) {
           clearTimeout(timer);
         }
-        timer = setTimeout(() => { extractNSRaidTools() }, 1000)
+        timer = setTimeout(() => { extractNSRaidToolsZip() }, 1000)
         console.log(progress.progress, progress.progressTotal, progress.transferSpeed, progress)
       })
     } catch (error) {
       isNSInstalling = false
-      nsInstallStateText = 'Failed Downloading';
+      resetNSInstallBtnText(true);
+    }
+  }
+
+  async function extractNSRaidToolsZip() {
+    try {
+      await validateAndExtractZip('./nsRaidTools.zip', wowFolder + '/Interface/Addons');
       resetNSInstallBtnText();
+      window.location.reload();
+    } catch (error: any) {
+      resetNSInstallBtnText(true);
+      console.error(error);
     }
   }
 
@@ -250,15 +165,11 @@
       }
     });
     if (update) {
-      let downloaded = 0;
-      let contentLength = 0;
       await update.downloadAndInstall();
-
       console.log('update installed');
       await relaunch();
     }    
   }
-
 </script>
 
 <meta http-equiv="refresh" content="900">
@@ -273,8 +184,8 @@
       <label for="api_key">API Key (Get From Discord)</label>
       <input name="api_key" id="api_key" bind:value={apiKey} onchange={updateKey} />
     </div>
-    <button type="button" disabled={!wowFolder || isInstalling} class:glowing={isUpdateAvailable} onclick={update}>{installStateText}</button>
-    <button type="button" disabled={!wowFolder || isNSInstalling} class:glowing={isNSUpdateAvailable} onclick={updateNSRaidTools}>{nsInstallStateText}</button>
+    <button type="button" disabled={!wowFolder || !apiKey || isInstalling} class:glowing={isUpdateAvailable} class:disabled-btn={!wowFolder || !apiKey} onclick={update}>{getAddonButtonText()}</button>
+    <button type="button" disabled={!wowFolder || !apiKey || isNSInstalling} class:glowing={isNSUpdateAvailable} class:disabled-btn={!wowFolder || !apiKey} onclick={updateNSRaidTools}>{getNSButtonText()}</button>
     {#await data.client}
       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
     {:then client}
@@ -285,28 +196,37 @@
       {/if}
     {/await}
     <div class="bottom">
-      {#await data.addon}
-        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
-      {:then addon}
+      {#if !apiKey || !wowFolder}
         <div class="indicator">
-          <div class="dot" class:gray={!addon.isActive} class:green={addon.isCurrent}></div>
+          <div class="dot gray"></div>
           <div>
-            <span>Addon</span>
-            <span>Version: {addon.currentVersion}</span>
+            <span>Set folder and API key to see addon status.</span>
           </div>
         </div>
-      {/await}
-      {#await data.nsRaidTools}
-        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
-      {:then addon}
-        <div class="indicator">
-          <div class="dot" class:gray={!addon.isActive} class:green={addon.isCurrent}></div>
-          <div>
-            <span>NS Raid Tools</span>
-            <span>Version: {addon.currentVersion}</span>
+      {:else}
+        {#await data.addon}
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+        {:then addon}
+          <div class="indicator">
+            <div class="dot" class:gray={!addon.isActive} class:green={addon.isCurrent}></div>
+            <div>
+              <span>Addon</span>
+              <span>Version: {addon.currentVersion}</span>
+            </div>
           </div>
-        </div>
-      {/await}
+        {/await}
+        {#await data.nsRaidTools}
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+        {:then addon}
+          <div class="indicator">
+            <div class="dot" class:gray={!addon.isActive} class:green={addon.isCurrent}></div>
+            <div>
+              <span>NS Raid Tools</span>
+              <span>Version: {addon.currentVersion}</span>
+            </div>
+          </div>
+        {/await}
+      {/if}
       {#await data.client}
         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
       {:then client}
@@ -422,6 +342,7 @@
     margin: 8px 0 0;
     border: transparent;
     border-radius: 5px;
+    cursor: pointer;
   }
 
   button.clientupdate {
@@ -477,4 +398,24 @@
   button.noanim:disabled {
     background: #009632;
   }
+  button.disabled-btn,
+  button:disabled {
+    background: #444 !important;
+    color: #bbb !important;
+    cursor: not-allowed !important;
+    box-shadow: none !important;
+    border: none !important;
+    opacity: 1 !important;
+    filter: grayscale(0.5);
+  }
+  button.clientupdate.noanim:disabled {
+    background: #009632 !important;
+    color: #fff !important;
+    border: none !important;
+    filter: none !important;
+    box-shadow: none !important;
+    opacity: 1 !important;
+    cursor: not-allowed !important;
+  }
+  .setup-warning { display: none; }
 </style>

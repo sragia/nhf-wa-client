@@ -1,69 +1,11 @@
 import { PUBLIC_SERVER_HOST } from "$env/static/public";
 import { getVersion } from '@tauri-apps/api/app';
-import { invoke } from "@tauri-apps/api/core";
-import { resolve } from "@tauri-apps/api/path";
 import { load as loadStore } from '@tauri-apps/plugin-store';
+import { getCurrentAddonVersion, getCurrentNSRaidToolsVersion, compareVersions } from './addonService';
 
-const compareVersions = (version1, version2) => {
-    const parseVersion = (version) => version.split('.').map(Number);
-
-    const [major1, minor1, patch1] = parseVersion(version1);
-    const [major2, minor2, patch2] = parseVersion(version2);
-
-    // Compare major, minor, and patch versions
-    if (major1 !== major2) {
-        return major1 > major2 ? 1 : -1;
-    }
-    if (minor1 !== minor2) {
-        return minor1 > minor2 ? 1 : -1;
-    }
-    if (patch1 !== patch2) {
-        return patch1 > patch2 ? 1 : -1;
-    }
-
-    return 0; // Versions are equal
-}
-
-const getCurrentAddonVersion = async () => {
-    const store = await loadStore('store.json');
-    try {
-        if (store) {
-            const storedFolder = await store.get('wow_folder');
-            if (storedFolder) {
-                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NHFAuraManager/NHFAuraManager.toc' });
-                const versionMatch = file.match(/## Version:\s*(\S+)/);
-                if (versionMatch) {
-                    return versionMatch[1];
-                }
-            }
-        }
-    } catch (error) {
-        console.error(error)
-    }
-
-    return false;
-}
-
-const getCurrentNSRaidToolsVersion = async () => {
-    const store = await loadStore('store.json');
-    try {
-        if (store) {
-            const storedFolder = await store.get('wow_folder');
-            if (storedFolder) {
-                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NorthernSkyRaidTools/NorthernSkyRaidTools.toc' });
-                const versionMatch = file.match(/## Version:\s*(\S+)/);
-                if (versionMatch) {
-                    return versionMatch[1];
-                }
-            }
-        }
-    } catch (error) {
-        console.error(error)
-    }
-
-    return false;
-}
-
+/**
+ * @param {{ fetch: typeof window.fetch }} param0
+ */
 export const load = async ({ fetch }) => {
     const store = await loadStore('store.json');
     const apiKey = await store?.get('api_key');
@@ -72,13 +14,13 @@ export const load = async ({ fetch }) => {
             "Authorization": apiKey
         }
     })
-        .then(response => response.json())
+        .then(response => response.json());
     const latestAddon = fetch(PUBLIC_SERVER_HOST + "/getLatestAddon", {
         headers: {
             "Authorization": apiKey
         }
     })
-        .then(response => response.json())
+        .then(response => response.json());
     return {
         isServerUp: new Promise((resolve) => {
             fetch(PUBLIC_SERVER_HOST + "/ping", {
@@ -121,7 +63,6 @@ export const load = async ({ fetch }) => {
                         data.currentVersion = currentVersion;
                         data.isCurrent = compareVersions(data.semVersion, currentVersion) === 0;
                     }
-
                     resolve(data);
                 })
             }).catch((error) => {
@@ -138,7 +79,7 @@ export const load = async ({ fetch }) => {
         nsRaidTools: new Promise((resolve) => {
             fetch('https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest')
             .then(response => response.json())
-            .then(data => {
+            .then((data) => {
                 const resolvedData = {isCurrent: false, currentVersion: 'N/A', isActive: true};
                 getCurrentNSRaidToolsVersion().then((currentVersion) => {
                     if (!currentVersion) {
@@ -148,7 +89,6 @@ export const load = async ({ fetch }) => {
                         resolvedData.currentVersion = currentVersion;
                         resolvedData.isCurrent = compareVersions(data.tag_name, currentVersion) === 0;
                     }
-
                     resolve(resolvedData);
                 }).catch((error) => {
                     console.error(error);
