@@ -1,112 +1,155 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
-  import { load } from '@tauri-apps/plugin-store';
-  import { download } from '@tauri-apps/plugin-upload';
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { load } from "@tauri-apps/plugin-store";
+  import { download } from "@tauri-apps/plugin-upload";
   import { PUBLIC_SERVER_HOST } from "$env/static/public";
-  import { check as clientCheck } from '@tauri-apps/plugin-updater';
-  import { relaunch } from '@tauri-apps/plugin-process';
-  import { getZipInfo, validateAndExtractZip } from './addonService';
+  import { check as clientCheck } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
+  import { getZipInfo, validateAndExtractZip } from "./addonService";
 
-  let wowFolder = $state('');
-  let apiKey = $state('');
+  let wowFolder = $state("");
+  let apiKey = $state("");
   let isInstalling = $state(false);
   let isNSInstalling = $state(false);
+  let isLRInstalling = $state(false);
   let isUpdateAvailable = $state(false);
   let isNSUpdateAvailable = $state(false);
+  let isLRUpdateAvailable = $state(false);
   let store: any = null;
 
   function getAddonButtonText() {
-    return !wowFolder ? 'Set WoW Folder'
-      : !apiKey ? 'Set API Key'
-      : isInstalling ? 'Downloading...'
-      : isUpdateAvailable ? 'Update Addon'
-      : 'Re-Install Addon';
+    return !wowFolder
+      ? "Set WoW Folder"
+      : !apiKey
+        ? "Set API Key"
+        : isInstalling
+          ? "Downloading..."
+          : isUpdateAvailable
+            ? "Update Addon"
+            : "Re-Install Addon";
   }
 
   function getNSButtonText() {
-    return !wowFolder ? 'Set WoW Folder'
-      : !apiKey ? 'Set API Key'
-      : isNSInstalling ? 'Downloading...'
-      : isNSUpdateAvailable ? 'Update NS Raid Tools'
-      : 'Re-Install NS Raid Tools';
+    return !wowFolder
+      ? "Set WoW Folder"
+      : !apiKey
+        ? "Set API Key"
+        : isNSInstalling
+          ? "Downloading..."
+          : isNSUpdateAvailable
+            ? "Update NS Raid Tools"
+            : "Re-Install NS Raid Tools";
+  }
+
+  function getLRButtonText() {
+    return !wowFolder
+      ? "Set WoW Folder"
+      : !apiKey
+        ? "Set API Key"
+        : isLRInstalling
+          ? "Downloading..."
+          : isLRUpdateAvailable
+            ? "Update Liquid Reminders"
+            : "Re-Install Liquid Reminders";
   }
 
   const check = async () => {
     const addon = await data.addon;
     const nsRaidTools = await data.nsRaidTools;
+    const liquidReminders = await data.liquidReminders;
     isUpdateAvailable = !addon.isCurrent;
     isNSUpdateAvailable = !nsRaidTools.isCurrent;
-  }
+    isLRUpdateAvailable = !liquidReminders.isCurrent;
+  };
   check();
 
   const setupStore = async () => {
-    store = await load('store.json');
+    store = await load("store.json");
     if (store) {
-      const storedFolder = await store.get('wow_folder');
-      const storedApiKey = await store.get('api_key');
+      const storedFolder = await store.get("wow_folder");
+      const storedApiKey = await store.get("api_key");
       if (storedFolder) {
-        wowFolder = storedFolder
+        wowFolder = storedFolder;
       }
       if (storedApiKey) {
-        apiKey = storedApiKey
+        apiKey = storedApiKey;
       }
-    } 
-  }
-  setupStore()
+    }
+  };
+  setupStore();
 
-  let {data} = $props();
+  let { data } = $props();
   const openFolder = async () => {
-    if (!store) return; 
+    if (!store) return;
     const folder = await open({
       directory: true,
       multiple: false,
     });
     if (folder) {
-      store.set('wow_folder', folder);
-      wowFolder = folder
+      store.set("wow_folder", folder);
+      wowFolder = folder;
       window.location.reload();
     }
-  }
+  };
 
   const resetInstallBtnText = (failed = false) => {
     setTimeout(() => {
-        isInstalling = false;
-        isUpdateAvailable = failed;
-      }, 4000)
-  }
+      isInstalling = false;
+      isUpdateAvailable = failed;
+    }, 4000);
+  };
 
   const resetNSInstallBtnText = (failed = false) => {
     setTimeout(() => {
-        isNSInstalling = false;
-        isNSUpdateAvailable = failed;
-      }, 4000)
-  }
+      isNSInstalling = false;
+      isNSUpdateAvailable = failed;
+    }, 4000);
+  };
+
+  const resetLRInstallBtnText = (failed = false) => {
+    setTimeout(() => {
+      isLRInstalling = false;
+      isLRUpdateAvailable = failed;
+    }, 4000);
+  };
 
   // --- Addon ZIP update logic ---
   const update = async () => {
     if (!wowFolder || !apiKey || isInstalling) return;
     try {
-      isInstalling = true
-      let timer: number|null = null;
+      isInstalling = true;
+      let timer: number | null = null;
       await download(
-        PUBLIC_SERVER_HOST + "/assets/addon.zip", 
-      './addon.zip', 
-      (progress) => {
-        if (timer) {
-          clearTimeout(timer);
-        }
-        timer = setTimeout(() => { extractAddonZip() }, 1000)
-        console.log(progress.progress, progress.progressTotal, progress.transferSpeed, progress)
-      }, new Map([["Authorization", apiKey]]))
+        PUBLIC_SERVER_HOST + "/assets/addon.zip",
+        "./addon.zip",
+        (progress) => {
+          if (timer) {
+            clearTimeout(timer);
+          }
+          timer = setTimeout(() => {
+            extractAddonZip();
+          }, 1000);
+          console.log(
+            progress.progress,
+            progress.progressTotal,
+            progress.transferSpeed,
+            progress,
+          );
+        },
+        new Map([["Authorization", apiKey]]),
+      );
     } catch (error) {
-      isInstalling = false
+      isInstalling = false;
       resetInstallBtnText(true);
     }
-  }
+  };
 
   async function extractAddonZip() {
     try {
-      await validateAndExtractZip('./addon.zip', wowFolder + '/Interface/Addons');
+      await validateAndExtractZip(
+        "./addon.zip",
+        wowFolder + "/Interface/Addons",
+      );
       resetInstallBtnText();
       window.location.reload();
     } catch (error: any) {
@@ -119,31 +162,42 @@
   const updateNSRaidTools = async () => {
     if (!wowFolder || !apiKey || isNSInstalling) return;
     try {
-      isNSInstalling = true
-      const response = await fetch('https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest')
+      isNSInstalling = true;
+      const response = await fetch(
+        "https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest",
+      );
       const nsData = await response.json();
-      const asset = nsData.assets.find((asset: any) => asset.content_type === 'application/zip');
+      const asset = nsData.assets.find(
+        (asset: any) => asset.content_type === "application/zip",
+      );
       const downloadUrl = asset.browser_download_url;
-      let timer: number|null = null;
-      await download(
-        downloadUrl, 
-      './nsRaidTools.zip', 
-      (progress) => {
+      let timer: number | null = null;
+      await download(downloadUrl, "./nsRaidTools.zip", (progress) => {
         if (timer) {
           clearTimeout(timer);
         }
-        timer = setTimeout(() => { extractNSRaidToolsZip() }, 1000)
-        console.log(progress.progress, progress.progressTotal, progress.transferSpeed, progress)
-      })
+        timer = setTimeout(() => {
+          extractNSRaidToolsZip();
+        }, 1000);
+        console.log(
+          progress.progress,
+          progress.progressTotal,
+          progress.transferSpeed,
+          progress,
+        );
+      });
     } catch (error) {
-      isNSInstalling = false
+      isNSInstalling = false;
       resetNSInstallBtnText(true);
     }
-  }
+  };
 
   async function extractNSRaidToolsZip() {
     try {
-      await validateAndExtractZip('./nsRaidTools.zip', wowFolder + '/Interface/Addons');
+      await validateAndExtractZip(
+        "./nsRaidTools.zip",
+        wowFolder + "/Interface/Addons",
+      );
       resetNSInstallBtnText();
       window.location.reload();
     } catch (error: any) {
@@ -152,45 +206,139 @@
     }
   }
 
+  // --- Liquid Reminders ZIP update logic ---
+  const updateLiquidReminders = async () => {
+    if (!wowFolder || !apiKey || isLRInstalling) return;
+    try {
+      isLRInstalling = true;
+      let timer: number | null = null;
+      await download(
+        PUBLIC_SERVER_HOST + "/assets/liquidReminders.zip",
+        "./liquidReminders.zip",
+        (progress) => {
+          if (timer) {
+            clearTimeout(timer);
+          }
+          timer = setTimeout(() => {
+            extractLiquidRemindersZip();
+          }, 1000);
+          console.log(
+            progress.progress,
+            progress.progressTotal,
+            progress.transferSpeed,
+            progress,
+          );
+        },
+        new Map([["Authorization", apiKey]]),
+      );
+    } catch (error) {
+      isLRInstalling = false;
+      resetLRInstallBtnText(true);
+    }
+  };
+
+  async function extractLiquidRemindersZip() {
+    try {
+      await validateAndExtractZip(
+        "./liquidReminders.zip",
+        wowFolder + "/Interface/Addons",
+      );
+      resetLRInstallBtnText();
+      window.location.reload();
+    } catch (error: any) {
+      resetLRInstallBtnText(true);
+      console.error(error);
+    }
+  }
+
   const updateKey = async () => {
     if (!store) return;
-    await store.set('api_key', apiKey);
+    await store.set("api_key", apiKey);
     window.location.reload();
-  }
+  };
 
   const updateClient = async () => {
     const update = await clientCheck({
       headers: {
-        "Authorization": apiKey
-      }
+        Authorization: apiKey,
+      },
     });
     if (update) {
       await update.downloadAndInstall();
-      console.log('update installed');
+      console.log("update installed");
       await relaunch();
-    }    
-  }
+    }
+  };
 </script>
 
-<meta http-equiv="refresh" content="900">
+<meta http-equiv="refresh" content="900" />
 <main>
   <h1>NHF Aura Manager</h1>
   <div class="container">
     <div class="input">
-      <label for="wow_folder">WoW Folder (i.e. .../World of Warcraft/_retail_)</label>
-      <input onclick={openFolder} name="folder" id="wow_folder" bind:value={wowFolder} />
+      <label for="wow_folder"
+        >WoW Folder (i.e. .../World of Warcraft/_retail_)</label
+      >
+      <input
+        onclick={openFolder}
+        name="folder"
+        id="wow_folder"
+        bind:value={wowFolder}
+      />
     </div>
     <div class="input">
       <label for="api_key">API Key (Get From Discord)</label>
-      <input name="api_key" id="api_key" bind:value={apiKey} onchange={updateKey} />
+      <input
+        name="api_key"
+        id="api_key"
+        bind:value={apiKey}
+        onchange={updateKey}
+      />
     </div>
-    <button type="button" disabled={!wowFolder || !apiKey || isInstalling} class:glowing={isUpdateAvailable} class:disabled-btn={!wowFolder || !apiKey} onclick={update}>{getAddonButtonText()}</button>
-    <button type="button" disabled={!wowFolder || !apiKey || isNSInstalling} class:glowing={isNSUpdateAvailable} class:disabled-btn={!wowFolder || !apiKey} onclick={updateNSRaidTools}>{getNSButtonText()}</button>
+    <button
+      type="button"
+      disabled={!wowFolder || !apiKey || isInstalling}
+      class:glowing={isUpdateAvailable}
+      class:disabled-btn={!wowFolder || !apiKey}
+      onclick={update}>{getAddonButtonText()}</button
+    >
+    <button
+      type="button"
+      disabled={!wowFolder || !apiKey || isNSInstalling}
+      class:glowing={isNSUpdateAvailable}
+      class:disabled-btn={!wowFolder || !apiKey}
+      onclick={updateNSRaidTools}>{getNSButtonText()}</button
+    >
+    <button
+      type="button"
+      disabled={!wowFolder || !apiKey || isLRInstalling}
+      class:glowing={isLRUpdateAvailable}
+      class:disabled-btn={!wowFolder || !apiKey}
+      onclick={updateLiquidReminders}>{getLRButtonText()}</button
+    >
     {#await data.client}
-      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        ><path
+          fill="currentColor"
+          d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+          ><animateTransform
+            attributeName="transform"
+            dur="0.75s"
+            repeatCount="indefinite"
+            type="rotate"
+            values="0 12 12;360 12 12"
+          /></path
+        ></svg
+      >
     {:then client}
       {#if !client.isCurrent}
-        <button class="clientupdate glowing" onclick={updateClient}>Update Client</button>
+        <button class="clientupdate glowing" onclick={updateClient}
+          >Update Client</button
+        >
       {:else}
         <button class="clientupdate noanim" disabled>Client Up To Date</button>
       {/if}
@@ -205,10 +353,30 @@
         </div>
       {:else}
         {#await data.addon}
-          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            ><path
+              fill="currentColor"
+              d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+              ><animateTransform
+                attributeName="transform"
+                dur="0.75s"
+                repeatCount="indefinite"
+                type="rotate"
+                values="0 12 12;360 12 12"
+              /></path
+            ></svg
+          >
         {:then addon}
           <div class="indicator">
-            <div class="dot" class:gray={!addon.isActive} class:green={addon.isCurrent}></div>
+            <div
+              class="dot"
+              class:gray={!addon.isActive}
+              class:green={addon.isCurrent}
+            ></div>
             <div>
               <span>Addon</span>
               <span>Version: {addon.currentVersion}</span>
@@ -216,22 +384,93 @@
           </div>
         {/await}
         {#await data.nsRaidTools}
-          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            ><path
+              fill="currentColor"
+              d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+              ><animateTransform
+                attributeName="transform"
+                dur="0.75s"
+                repeatCount="indefinite"
+                type="rotate"
+                values="0 12 12;360 12 12"
+              /></path
+            ></svg
+          >
         {:then addon}
           <div class="indicator">
-            <div class="dot" class:gray={!addon.isActive} class:green={addon.isCurrent}></div>
+            <div
+              class="dot"
+              class:gray={!addon.isActive}
+              class:green={addon.isCurrent}
+            ></div>
             <div>
               <span>NS Raid Tools</span>
               <span>Version: {addon.currentVersion}</span>
             </div>
           </div>
         {/await}
+        {#await data.liquidReminders}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            ><path
+              fill="currentColor"
+              d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+              ><animateTransform
+                attributeName="transform"
+                dur="0.75s"
+                repeatCount="indefinite"
+                type="rotate"
+                values="0 12 12;360 12 12"
+              /></path
+            ></svg
+          >
+        {:then addon}
+          <div class="indicator">
+            <div
+              class="dot"
+              class:gray={!addon.isActive}
+              class:green={addon.isCurrent}
+            ></div>
+            <div>
+              <span>Liquid Reminders</span>
+              <span>Version: {addon.currentVersion}</span>
+            </div>
+          </div>
+        {/await}
       {/if}
       {#await data.client}
-        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          ><path
+            fill="currentColor"
+            d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+            ><animateTransform
+              attributeName="transform"
+              dur="0.75s"
+              repeatCount="indefinite"
+              type="rotate"
+              values="0 12 12;360 12 12"
+            /></path
+          ></svg
+        >
       {:then client}
         <div class="indicator">
-          <div class="dot" class:gray={!client.isActive} class:green={client.isCurrent}></div>
+          <div
+            class="dot"
+            class:gray={!client.isActive}
+            class:green={client.isCurrent}
+          ></div>
           <div>
             <span>Client</span>
             <span>Version: {client.currentVersion}</span>
@@ -239,7 +478,23 @@
         </div>
       {/await}
       {#await data.isServerUp}
-        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"><animateTransform attributeName="transform" dur="0.75s" repeatCount="indefinite" type="rotate" values="0 12 12;360 12 12"/></path></svg>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          ><path
+            fill="currentColor"
+            d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+            ><animateTransform
+              attributeName="transform"
+              dur="0.75s"
+              repeatCount="indefinite"
+              type="rotate"
+              values="0 12 12;360 12 12"
+            /></path
+          ></svg
+        >
       {:then isServerUp}
         <div class="indicator">
           <div class="dot" class:green={isServerUp}></div>
@@ -251,7 +506,7 @@
 </main>
 
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
+  @import url("https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap");
   main {
     color: #ebebd3;
     font-family: "Poppins", sans-serif;
@@ -334,7 +589,7 @@
     font-optical-sizing: auto;
     font-weight: 400;
     font-style: normal;
-    background: #5899E2;
+    background: #5899e2;
     color: #fefefe;
     position: relative;
     padding: 8px 16px;
@@ -356,11 +611,22 @@
   }
 
   button:before {
-    content: '';
-    background: linear-gradient(45deg, #ff0000, #ff7300, #fffb00, #48ff00, #00ffd5, #002bff, #7a00ff, #ff00c8, #ff0000);
+    content: "";
+    background: linear-gradient(
+      45deg,
+      #ff0000,
+      #ff7300,
+      #fffb00,
+      #48ff00,
+      #00ffd5,
+      #002bff,
+      #7a00ff,
+      #ff00c8,
+      #ff0000
+    );
     position: absolute;
     top: -2px;
-    left:-2px;
+    left: -2px;
     background-size: 400%;
     z-index: -1;
     filter: blur(5px);
@@ -368,13 +634,13 @@
     height: calc(100% + 4px);
     animation: glowing 20s linear infinite;
     opacity: 0;
-    transition: opacity .3s ease-in-out;
+    transition: opacity 0.3s ease-in-out;
     border-radius: 10px;
   }
 
   button:after {
     z-index: -1;
-    content: '';
+    content: "";
     position: absolute;
     width: 100%;
     height: 100%;
@@ -385,14 +651,20 @@
   }
 
   @keyframes glowing {
-    0% { background-position: 0 0; }
-    50% { background-position: 400% 0; }
-    100% { background-position: 0 0; }
+    0% {
+      background-position: 0 0;
+    }
+    50% {
+      background-position: 400% 0;
+    }
+    100% {
+      background-position: 0 0;
+    }
   }
 
-  button.glowing:before, 
+  button.glowing:before,
   button:not(.noanim):disabled:before {
-      opacity: 1;
+    opacity: 1;
   }
 
   button.noanim:disabled {
@@ -417,5 +689,7 @@
     opacity: 1 !important;
     cursor: not-allowed !important;
   }
-  .setup-warning { display: none; }
+  .setup-warning {
+    display: none;
+  }
 </style>

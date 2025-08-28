@@ -14,7 +14,7 @@
       {
         "title": "NHF Aura Manager",
         "width": 450,
-        "height": 350,
+        "height": 410,
         "backgroundColor": "#1e1e1e",
         "titleBarStyle": "Transparent",
         "resizable": false

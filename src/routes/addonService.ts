@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { load as loadStore } from '@tauri-apps/plugin-store';
-import { compareVersions, extractVersionFromToc } from './versionUtils';
+import { compareVersions, extractVersionFromToc, extractVersionFromChangelog } from './versionUtils';
 
 export async function getCurrentAddonVersion(): Promise<string | false> {
     const store = await loadStore('store.json');
@@ -24,8 +24,24 @@ export async function getCurrentNSRaidToolsVersion(): Promise<string | false> {
         if (store) {
             const storedFolder = await store.get('wow_folder');
             if (storedFolder) {
-                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NorthernSkyRaidTools/NorthernSkyRaidTools.toc' });
+                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/AddOns/NorthernSkyRaidTools/NorthernSkyRaidTools.toc' }) as string;
                 return extractVersionFromToc(file);
+            }
+        }
+    } catch (error) {
+        console.error(error);
+    }
+    return false;
+}
+
+export async function getCurrentLiquidRemindersVersion(): Promise<string | false> {
+    const store = await loadStore('store.json');
+    try {
+        if (store) {
+            const storedFolder = await store.get('wow_folder');
+            if (storedFolder) {
+                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/AddOns/TimelineReminders/CHANGELOG.md' }) as string;
+                return extractVersionFromChangelog(file);
             }
         }
     } catch (error) {

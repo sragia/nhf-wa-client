@@ -8,5 +8,6 @@ node_modules
 !.env.example
 src-tauri/addon.zip
 src-tauri/nsRaidTools.zip
+src-tauri/liquidReminders.zip
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
