@@ -3,6 +3,11 @@ use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 use zip::ZipArchive;
+use zip::write::FileOptions;
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use tauri::Emitter;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -157,6 +162,375 @@ fn read_file(file_path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize, Deserialize)]
+struct BackupProgress {
+    progress: u32,
+    status: String,
+    completed: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct BackupProgressEvent {
+    progress: u32,
+    status: String,
+    current_file: Option<String>,
+    files_processed: usize,
+    total_files: usize,
+}
+
+fn cleanup_old_backups(backup_dir: &std::path::Path, app_handle: &tauri::AppHandle) -> Result<usize, String> {
+    let mut deleted_count = 0;
+    let two_weeks_ago = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Failed to get current time: {}", e))?
+        .as_secs() - (14 * 24 * 60 * 60); // 14 days in seconds
+
+    // Emit cleanup start progress
+    let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+        progress: 1,
+        status: "Cleaning up old backups...".to_string(),
+        current_file: None,
+        files_processed: 0,
+        total_files: 0,
+    });
+
+    if !backup_dir.exists() {
+        return Ok(0);
+    }
+
+    let entries = fs::read_dir(backup_dir)
+        .map_err(|e| format!("Failed to read backup directory: {}", e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("zip") {
+            // Check if file is a backup file (starts with "WeakAuras_Backup_")
+            if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                if filename.starts_with("WeakAuras_Backup_") {
+                    // Get file metadata to check creation time
+                    let metadata = fs::metadata(&path)
+                        .map_err(|e| format!("Failed to get file metadata for {:?}: {}", path, e))?;
+                    
+                    let created_time = metadata.created()
+                        .or_else(|_| metadata.modified()) // Fallback to modified time if created time not available
+                        .map_err(|e| format!("Failed to get file time for {:?}: {}", path, e))?
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|e| format!("Failed to convert file time for {:?}: {}", path, e))?
+                        .as_secs();
+
+                    if created_time < two_weeks_ago {
+                        // Delete old backup file
+                        fs::remove_file(&path)
+                            .map_err(|e| format!("Failed to delete old backup {:?}: {}", path, e))?;
+                        
+                        deleted_count += 1;
+                        
+                        // Emit cleanup progress
+                        let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+                            progress: 2,
+                            status: format!("Deleted old backup: {}", filename),
+                            current_file: Some(filename.to_string()),
+                            files_processed: deleted_count,
+                            total_files: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if deleted_count > 0 {
+        let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+            progress: 3,
+            status: format!("Cleaned up {} old backup(s)", deleted_count),
+            current_file: None,
+            files_processed: deleted_count,
+            total_files: 0,
+        });
+    }
+
+    Ok(deleted_count)
+}
+
+
+fn backup_directory_recursive_with_progress(
+    dir_path: &std::path::Path,
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    options: &zip::write::FileOptions<()>,
+    account_id: &str,
+    app_handle: &tauri::AppHandle,
+    mut files_processed: usize,
+    total_files: usize,
+) -> Result<(usize, usize, usize), String> {
+    let mut file_count = 0;
+    
+    fn walk_dir_with_progress(
+        dir_path: &std::path::Path,
+        zip: &mut zip::ZipWriter<std::fs::File>,
+        options: &zip::write::FileOptions<()>,
+        account_id: &str,
+        base_path: &std::path::Path,
+        file_count: &mut usize,
+        files_processed: &mut usize,
+        total_files: usize,
+        app_handle: &tauri::AppHandle,
+    ) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir_path)
+            .map_err(|e| format!("Failed to read directory {:?}: {}", dir_path, e))? {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                walk_dir_with_progress(&path, zip, options, account_id, base_path, file_count, files_processed, total_files, app_handle)?;
+            } else if path.is_file() {
+                // Calculate relative path from the account folder
+                let relative_path = path.strip_prefix(base_path)
+                    .map_err(|e| format!("Failed to calculate relative path: {}", e))?;
+                
+                // Create zip entry path: account_id/relative_path
+                let zip_entry_name = format!("{}/{}", account_id, relative_path.to_string_lossy().replace('\\', "/"));
+                
+                // Emit progress update every 10 files or for important files
+                if *files_processed % 10 == 0 || relative_path.to_string_lossy().contains("WeakAuras") {
+                    // For full backups, use a different progress approach
+                    let progress_percent = if total_files > 0 && total_files > *files_processed {
+                        // We have a known total and haven't exceeded it
+                        8 + ((*files_processed as f32 / total_files as f32) * 80.0) as u32
+                    } else {
+                        // Dynamic progress: show progress based on files processed
+                        // Cap at 85% to leave room for finalization
+                        let dynamic_progress = 8 + (*files_processed / 20) as u32;
+                        if dynamic_progress > 85 { 85 } else { dynamic_progress }
+                    };
+                    
+                    let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+                        progress: progress_percent,
+                        status: format!("Backing up: {}", zip_entry_name),
+                        current_file: Some(zip_entry_name.clone()),
+                        files_processed: *files_processed,
+                        total_files: 0, // Don't show file count to user
+                    });
+                }
+                
+                // Read file content
+                let file_content = std::fs::read(&path)
+                    .map_err(|e| format!("Failed to read file {:?}: {}", path, e))?;
+                
+                // Add to zip
+                zip.start_file(&zip_entry_name, *options)
+                    .map_err(|e| format!("Failed to add file to zip: {}", e))?;
+                
+                zip.write_all(&file_content)
+                    .map_err(|e| format!("Failed to write file content to zip: {}", e))?;
+                
+                *file_count += 1;
+                *files_processed += 1;
+            }
+        }
+        Ok(())
+    }
+    
+    walk_dir_with_progress(dir_path, zip, options, account_id, dir_path, &mut file_count, &mut files_processed, total_files, app_handle)?;
+    Ok((file_count, files_processed, files_processed))
+}
+
+
+#[tauri::command]
+async fn backup_weakauras(
+    app_handle: tauri::AppHandle,
+    wow_folder: String, 
+    backup_all_data: bool
+) -> Result<BackupProgress, String> {
+    let wtf_path = Path::new(&wow_folder).join("WTF").join("Account");
+    
+    if !wtf_path.exists() {
+        return Ok(BackupProgress {
+            progress: 0,
+            status: "WTF/Account folder not found".to_string(),
+            completed: false,
+            error: Some("WTF/Account folder not found".to_string()),
+        });
+    }
+
+    // Emit initial progress
+    let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+        progress: 0,
+        status: "Scanning account folders...".to_string(),
+        current_file: None,
+        files_processed: 0,
+        total_files: 0,
+    });
+
+    // Find all account folders
+    let account_entries = fs::read_dir(&wtf_path)
+        .map_err(|e| format!("Failed to read WTF/Account directory: {}", e))?;
+
+    let mut account_folders = Vec::new();
+    for entry in account_entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        if entry.file_type().map_err(|e| format!("Failed to get file type: {}", e))?.is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                if !name.starts_with('.') {
+                    account_folders.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    if account_folders.is_empty() {
+        return Ok(BackupProgress {
+            progress: 0,
+            status: "No account folders found".to_string(),
+            completed: false,
+            error: Some("No account folders found in WTF/Account".to_string()),
+        });
+    }
+
+    // For progress tracking, we'll use a dynamic approach
+    // Instead of pre-counting, we'll discover files as we process them
+    let mut estimated_total = 0;
+    if !backup_all_data {
+        // For WeakAuras.lua only, we can accurately count these
+        for account_id in &account_folders {
+            let weakauras_path = wtf_path.join(account_id).join("SavedVariables").join("WeakAuras.lua");
+            if weakauras_path.exists() {
+                estimated_total += 1;
+            }
+        }
+    }
+    // For full backup, we'll start with 0 and discover as we go
+
+    // Emit initial progress
+    let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+        progress: 5,
+        status: "Starting backup...".to_string(),
+        current_file: None,
+        files_processed: 0,
+        total_files: 0,
+    });
+
+    // Create backup directory
+    let backup_dir = Path::new(&wow_folder).join("NHF-Backup");
+    if !backup_dir.exists() {
+        fs::create_dir_all(&backup_dir)
+            .map_err(|e| format!("Failed to create backup directory: {}", e))?;
+    }
+
+    // Clean up old backups (older than 2 weeks) before creating new one
+    let _deleted_count = cleanup_old_backups(&backup_dir, &app_handle)?;
+
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ").to_string();
+    let zip_filename = format!("WeakAuras_Backup_{}.zip", timestamp);
+    let zip_file_path = backup_dir.join(&zip_filename);
+
+    // Create the zip file
+    let zip_file = File::create(&zip_file_path)
+        .map_err(|e| format!("Failed to create backup zip file: {}", e))?;
+    
+    let mut zip = zip::ZipWriter::new(zip_file);
+    let options: FileOptions<()> = FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut backed_up_count = 0;
+    let mut files_processed = 0;
+    let mut actual_total = estimated_total; // Will be updated as we discover more files
+
+    // Emit zip creation progress
+    let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+        progress: 8,
+        status: "Creating backup archive...".to_string(),
+        current_file: None,
+        files_processed: 0,
+        total_files: 0,
+    });
+
+    for account_id in &account_folders {
+        if backup_all_data {
+            // Backup entire account folder with progress
+            let account_path = wtf_path.join(account_id);
+            if account_path.exists() {
+                let (count, processed, discovered_total) = backup_directory_recursive_with_progress(
+                    &account_path, 
+                    &mut zip, 
+                    &options, 
+                    account_id,
+                    &app_handle,
+                    files_processed,
+                    actual_total
+                )?;
+                backed_up_count += count;
+                files_processed += processed;
+                // Update total if we discovered more files than estimated
+                if discovered_total > actual_total {
+                    actual_total = discovered_total;
+                }
+            }
+        } else {
+            // Backup only WeakAuras.lua
+            let saved_vars_path = wtf_path.join(account_id).join("SavedVariables");
+            let weakauras_path = saved_vars_path.join("WeakAuras.lua");
+
+            if weakauras_path.exists() {
+                // Emit current file progress
+                let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+                    progress: 8 + ((files_processed as f32 / actual_total as f32) * 80.0) as u32,
+                    status: format!("Backing up WeakAuras.lua for account {}", account_id),
+                    current_file: Some(format!("{}/WeakAuras.lua", account_id)),
+                    files_processed,
+                    total_files: 0, // Don't show file count to user
+                });
+
+                // Read the WeakAuras.lua file content
+                let file_content = fs::read_to_string(&weakauras_path)
+                    .map_err(|e| format!("Failed to read WeakAuras.lua for account {}: {}", account_id, e))?;
+
+                // Add file to zip in account-specific folder, preserving original filename
+                let zip_entry_name = format!("{}/WeakAuras.lua", account_id);
+                zip.start_file(&zip_entry_name, options)
+                    .map_err(|e| format!("Failed to add file to zip: {}", e))?;
+                
+                zip.write_all(file_content.as_bytes())
+                    .map_err(|e| format!("Failed to write file content to zip: {}", e))?;
+                
+                backed_up_count += 1;
+                files_processed += 1;
+            }
+        }
+    }
+
+    // Emit finalization progress
+    let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+        progress: 95,
+        status: "Finalizing backup archive...".to_string(),
+        current_file: None,
+        files_processed,
+        total_files: 0,
+    });
+
+    // Finish the zip file
+    zip.finish()
+        .map_err(|e| format!("Failed to finalize zip file: {}", e))?;
+
+    // Emit completion
+    let _ = app_handle.emit("backup-progress", BackupProgressEvent {
+        progress: 100,
+        status: format!("Backup completed! {} files backed up to {}.", backed_up_count, zip_filename),
+        current_file: None,
+        files_processed,
+        total_files: 0,
+    });
+
+    Ok(BackupProgress {
+        progress: 100,
+        status: format!("Backup completed! {} files backed up to {}.", backed_up_count, zip_filename),
+        completed: true,
+        error: None,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -172,7 +546,8 @@ pub fn run() {
             extract_zip,
             read_file,
             validate_zip,
-            get_zip_info
+            get_zip_info,
+            backup_weakauras
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "NHF Aura Manager",
-        "width": 450,
-        "height": 410,
+        "width": 800,
+        "height": 650,
         "backgroundColor": "#1e1e1e",
         "titleBarStyle": "Transparent",
         "resizable": false
