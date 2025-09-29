@@ -821,7 +821,7 @@
   };
 </script>
 
-<meta http-equiv="refresh" content="900" />
+<meta http-equiv="refresh" content="300" />
 <main>
   {#if notification.show}
     <div
