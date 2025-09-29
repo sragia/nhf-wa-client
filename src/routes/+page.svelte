@@ -41,6 +41,9 @@
   let updateQueue = $state<string[]>([]);
   let currentUpdating = $state("");
 
+  // Startup functionality
+  let startOnStartup = $state(false);
+
   function showNotification(
     message: string,
     type: "error" | "success" = "error",
@@ -135,6 +138,7 @@
       const storedLastAppStartTime = await store.get("last_app_start_time");
       const storedMinimizeToTray = await store.get("minimize_to_tray");
       const storedAutoUpdate = await store.get("auto_update");
+      const storedStartOnStartup = await store.get("start_on_startup");
 
       if (storedFolder) {
         wowFolder = storedFolder;
@@ -168,6 +172,15 @@
       }
       if (storedAutoUpdate !== undefined) {
         autoUpdate = storedAutoUpdate;
+      }
+      if (storedStartOnStartup !== undefined) {
+        startOnStartup = storedStartOnStartup;
+        // Sync the backend state
+        try {
+          await invoke("set_start_on_startup", { enabled: startOnStartup });
+        } catch (error) {
+          console.error("Failed to sync start on startup setting:", error);
+        }
       }
     }
   };
@@ -500,6 +513,18 @@
   const updateAutoUpdateSetting = async () => {
     if (!store) return;
     await store.set("auto_update", autoUpdate);
+  };
+
+  // Startup functionality
+  const updateStartOnStartupSetting = async () => {
+    if (!store) return;
+    await store.set("start_on_startup", startOnStartup);
+    // Notify the backend about the setting change
+    try {
+      await invoke("set_start_on_startup", { enabled: startOnStartup });
+    } catch (error) {
+      console.error("Failed to update start on startup setting:", error);
+    }
   };
 
   // Dedicated auto-update functions that don't interfere with manual updates
@@ -882,6 +907,16 @@
           onchange={updateAutoUpdateSetting}
         />
         <label for="auto_update">Auto Update Addons</label>
+      </div>
+
+      <div class="checkbox-group" style="margin-top: 8px;">
+        <input
+          type="checkbox"
+          id="start_on_startup"
+          bind:checked={startOnStartup}
+          onchange={updateStartOnStartupSetting}
+        />
+        <label for="start_on_startup">Start on PC Startup</label>
       </div>
 
       <div class="backup-section">

@@ -12,6 +12,11 @@ use tauri::menu::{Menu, MenuItem};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+use winreg::enums::*;
+#[cfg(target_os = "windows")]
+use winreg::RegKey;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -564,6 +569,75 @@ async fn show_window(window: tauri::Window) -> Result<(), String> {
     Ok(())
 }
 
+// Startup management functions
+#[tauri::command]
+async fn set_start_on_startup(_app_handle: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_WRITE)
+            .map_err(|e| format!("Failed to open registry key: {}", e))?;
+        
+        let app_name = "NHF Aura Manager";
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("Failed to get app executable path: {}", e))?;
+        
+        if enabled {
+            // Add to startup
+            run_key.set_value(app_name, &exe_path.to_string_lossy().to_string())
+                .map_err(|e| format!("Failed to set registry value: {}", e))?;
+        } else {
+            // Remove from startup
+            match run_key.delete_value(app_name) {
+                Ok(_) => {},
+                Err(e) => {
+                    // Check if it's a file not found error (which is fine)
+                    if e.to_string().contains("file not found") || e.to_string().contains("not found") {
+                        // Key doesn't exist, which is fine
+                    } else {
+                        return Err(format!("Failed to delete registry value: {}", e));
+                    }
+                }
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Err("Startup management is only supported on Windows".to_string());
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_start_on_startup() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_READ)
+            .map_err(|e| format!("Failed to open registry key: {}", e))?;
+        
+        let app_name = "NHF Aura Manager";
+        match run_key.get_value::<String, _>(app_name) {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                // Check if it's a file not found error
+                if e.to_string().contains("file not found") || e.to_string().contains("not found") {
+                    Ok(false)
+                } else {
+                    Err(format!("Failed to read registry value: {}", e))
+                }
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
 
 
 
@@ -635,7 +709,9 @@ pub fn run() {
             backup_weakauras,
             set_minimize_to_tray,
             get_minimize_to_tray,
-            show_window
+            show_window,
+            set_start_on_startup,
+            get_start_on_startup
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
