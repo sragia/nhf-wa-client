@@ -583,8 +583,9 @@ async fn set_start_on_startup(_app_handle: tauri::AppHandle, enabled: bool) -> R
             .map_err(|e| format!("Failed to get app executable path: {}", e))?;
         
         if enabled {
-            // Add to startup
-            run_key.set_value(app_name, &exe_path.to_string_lossy().to_string())
+            // Add to startup with minimized argument
+            let startup_command = format!("{} --minimized", exe_path.to_string_lossy());
+            run_key.set_value(app_name, &startup_command)
                 .map_err(|e| format!("Failed to set registry value: {}", e))?;
         } else {
             // Remove from startup
@@ -620,7 +621,10 @@ async fn get_start_on_startup() -> Result<bool, String> {
         
         let app_name = "NHF Aura Manager";
         match run_key.get_value::<String, _>(app_name) {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                // App is set to start on startup (regardless of minimized flag)
+                Ok(true)
+            },
             Err(e) => {
                 // Check if it's a file not found error
                 if e.to_string().contains("file not found") || e.to_string().contains("not found") {
@@ -653,6 +657,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(MinimizeToTrayState { enabled: false }))
         .setup(|app| {
+            // Check if app should start minimized
+            let args: Vec<String> = std::env::args().collect();
+            let start_minimized = args.iter().any(|arg| arg == "--minimized");
+            
             // Create tray menu
             let show_item = MenuItem::with_id(app, "show", "Show NHF Aura Manager", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -697,6 +705,13 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Hide window if started with --minimized flag
+            if start_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
 
             Ok(())
         })
