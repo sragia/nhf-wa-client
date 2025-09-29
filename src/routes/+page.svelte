@@ -18,6 +18,7 @@
   let isUpdateAvailable = $state(false);
   let isNSUpdateAvailable = $state(false);
   let isLRUpdateAvailable = $state(false);
+
   let store: any = null;
   let notification = $state({ show: false, message: "", type: "error" });
 
@@ -31,6 +32,15 @@
   let lastBackupTime = $state("");
   let lastAppStartTime = $state("");
 
+  // Minimize to tray functionality
+  let minimizeToTray = $state(false);
+
+  // Auto-update functionality
+  let autoUpdate = $state(false);
+  let isAutoUpdating = $state(false);
+  let updateQueue = $state<string[]>([]);
+  let currentUpdating = $state("");
+
   function showNotification(
     message: string,
     type: "error" | "success" = "error",
@@ -41,6 +51,11 @@
     }, 5000);
   }
 
+  // Button text state variables
+  let addonButtonText = $state("Re-Install");
+  let nsButtonText = $state("Re-Install");
+  let lrButtonText = $state("Re-Install");
+
   function getAddonButtonText() {
     return !wowFolder
       ? "Set Folder"
@@ -48,9 +63,7 @@
         ? "Set API Key"
         : isInstalling
           ? "Downloading..."
-          : isUpdateAvailable
-            ? "Update"
-            : "Re-Install";
+          : addonButtonText;
   }
 
   function getNSButtonText() {
@@ -60,9 +73,7 @@
         ? "Set API Key"
         : isNSInstalling
           ? "Downloading..."
-          : isNSUpdateAvailable
-            ? "Update"
-            : "Re-Install";
+          : nsButtonText;
   }
 
   function getLRButtonText() {
@@ -72,18 +83,43 @@
         ? "Set API Key"
         : isLRInstalling
           ? "Downloading..."
-          : isLRUpdateAvailable
-            ? "Update"
-            : "Re-Install";
+          : lrButtonText;
   }
 
   const check = async () => {
     const addon = await data.addon;
     const nsRaidTools = await data.nsRaidTools;
     const liquidReminders = await data.liquidReminders;
+
+    // Set update availability flags
     isUpdateAvailable = !addon.isCurrent;
     isNSUpdateAvailable = !nsRaidTools.isCurrent;
     isLRUpdateAvailable = !liquidReminders.isCurrent;
+
+    // Set button text based on installation and update status
+    if (!addon.isInstalled) {
+      addonButtonText = "Install";
+    } else if (!addon.isCurrent) {
+      addonButtonText = "Update";
+    } else {
+      addonButtonText = "Re-Install";
+    }
+
+    if (!nsRaidTools.isInstalled) {
+      nsButtonText = "Install";
+    } else if (!nsRaidTools.isCurrent) {
+      nsButtonText = "Update";
+    } else {
+      nsButtonText = "Re-Install";
+    }
+
+    if (!liquidReminders.isInstalled) {
+      lrButtonText = "Install";
+    } else if (!liquidReminders.isCurrent) {
+      lrButtonText = "Update";
+    } else {
+      lrButtonText = "Re-Install";
+    }
   };
   check();
 
@@ -97,6 +133,8 @@
       const storedBackupAllData = await store.get("backup_all_data");
       const storedLastBackupTime = await store.get("last_backup_time");
       const storedLastAppStartTime = await store.get("last_app_start_time");
+      const storedMinimizeToTray = await store.get("minimize_to_tray");
+      const storedAutoUpdate = await store.get("auto_update");
 
       if (storedFolder) {
         wowFolder = storedFolder;
@@ -118,6 +156,18 @@
       }
       if (storedLastAppStartTime) {
         lastAppStartTime = storedLastAppStartTime;
+      }
+      if (storedMinimizeToTray !== undefined) {
+        minimizeToTray = storedMinimizeToTray;
+        // Sync the backend state
+        try {
+          await invoke("set_minimize_to_tray", { enabled: minimizeToTray });
+        } catch (error) {
+          console.error("Failed to sync minimize to tray setting:", error);
+        }
+      }
+      if (storedAutoUpdate !== undefined) {
+        autoUpdate = storedAutoUpdate;
       }
     }
   };
@@ -161,6 +211,46 @@
   // Run startup backup after a short delay to ensure everything is loaded
   setTimeout(runStartupBackup, 1000);
 
+  // Run auto-update check on startup after a short delay to ensure all addons are loaded
+  setTimeout(async () => {
+    if (autoUpdate) {
+      await autoUpdateCheck();
+    }
+  }, 2000); // Reduced delay to 2 seconds for faster startup
+
+  // Set up auto-update interval (much shorter for faster updates)
+  let autoUpdateInterval: number | null = null;
+
+  const startAutoUpdateInterval = () => {
+    if (autoUpdateInterval) {
+      clearInterval(autoUpdateInterval);
+    }
+
+    if (autoUpdate) {
+      // Run immediately when enabled, then every 2 minutes
+      autoUpdateCheck();
+
+      autoUpdateInterval = setInterval(
+        async () => {
+          await autoUpdateCheck();
+        },
+        2 * 60 * 1000, // 2 minutes instead of 15 minutes
+      );
+    }
+  };
+
+  // Start the interval when auto-update is enabled
+  $effect(() => {
+    if (autoUpdate) {
+      startAutoUpdateInterval();
+    } else {
+      if (autoUpdateInterval) {
+        clearInterval(autoUpdateInterval);
+        autoUpdateInterval = null;
+      }
+    }
+  });
+
   let { data } = $props();
 
   // Cleanup event listener on component destroy
@@ -168,6 +258,9 @@
     return () => {
       if (unlistenBackupProgress) {
         unlistenBackupProgress();
+      }
+      if (autoUpdateInterval) {
+        clearInterval(autoUpdateInterval);
       }
     };
   });
@@ -316,17 +409,12 @@
     if (!wowFolder || !apiKey || isLRInstalling) return;
     try {
       isLRInstalling = true;
-      let timer: number | null = null;
+      let downloadComplete = false;
+
       await download(
         PUBLIC_SERVER_HOST + "/assets/liquidReminders.zip",
         "./liquidReminders.zip",
         (progress) => {
-          if (timer) {
-            clearTimeout(timer);
-          }
-          timer = setTimeout(() => {
-            extractLiquidRemindersZip();
-          }, 1000);
           console.log(
             progress.progress,
             progress.progressTotal,
@@ -336,7 +424,22 @@
         },
         new Map([["Authorization", apiKey]]),
       );
+
+      console.log("Liquid Reminders download complete, starting extraction...");
+      downloadComplete = true;
+
+      // Extract immediately after download completes
+      await validateAndExtractZip(
+        "./liquidReminders.zip",
+        wowFolder + "/Interface/Addons",
+      );
+
+      console.log("Liquid Reminders extraction complete");
+      isLRInstalling = false;
+      resetLRInstallBtnText();
+      window.location.reload();
     } catch (error) {
+      console.error("Failed to update Liquid Reminders:", error);
       isLRInstalling = false;
       resetLRInstallBtnText(true);
       showNotification(
@@ -344,23 +447,6 @@
       );
     }
   };
-
-  async function extractLiquidRemindersZip() {
-    try {
-      await validateAndExtractZip(
-        "./liquidReminders.zip",
-        wowFolder + "/Interface/Addons",
-      );
-      resetLRInstallBtnText();
-      window.location.reload();
-    } catch (error: any) {
-      resetLRInstallBtnText(true);
-      showNotification(
-        "Failed to extract Liquid Reminders. Please check your WoW folder path and try again.",
-      );
-      console.error(error);
-    }
-  }
 
   const updateKey = async () => {
     if (!store) return;
@@ -387,6 +473,295 @@
     await store.set("backup_enabled", backupEnabled);
     await store.set("backup_on_startup", backupOnStartup);
     await store.set("backup_all_data", backupAllData);
+  };
+
+  // Minimize to tray functionality
+  const updateMinimizeToTray = async () => {
+    if (!store) return;
+    await store.set("minimize_to_tray", minimizeToTray);
+    // Notify the backend about the setting change
+    try {
+      await invoke("set_minimize_to_tray", { enabled: minimizeToTray });
+    } catch (error) {
+      console.error("Failed to update minimize to tray setting:", error);
+    }
+  };
+
+  // Show window function (can be called from external sources)
+  const showWindow = async () => {
+    try {
+      await invoke("show_window");
+    } catch (error) {
+      console.error("Failed to show window:", error);
+    }
+  };
+
+  // Auto-update functionality
+  const updateAutoUpdateSetting = async () => {
+    if (!store) return;
+    await store.set("auto_update", autoUpdate);
+  };
+
+  // Dedicated auto-update functions that don't interfere with manual updates
+  const autoUpdateNHFAddon = async () => {
+    try {
+      console.log("Auto-updating NHF Addon...");
+      isInstalling = true; // Set button state
+
+      console.log("Starting download of NHF Addon...");
+      await download(
+        PUBLIC_SERVER_HOST + "/assets/addon.zip",
+        "./addon.zip",
+        (progress) => {
+          console.log("NHF Addon download progress:", progress);
+        },
+        new Map([["Authorization", apiKey]]),
+      );
+      console.log("NHF Addon download complete, starting extraction...");
+
+      // Extract immediately without timer
+      await validateAndExtractZip(
+        "./addon.zip",
+        wowFolder + "/Interface/Addons",
+      );
+      console.log("NHF Addon extraction complete");
+
+      console.log("NHF Addon auto-update complete");
+      isInstalling = false; // Reset button state on success
+    } catch (error) {
+      console.error("Failed to auto-update NHF Addon:", error);
+      isInstalling = false; // Reset button state on error
+      throw error;
+    }
+  };
+
+  const autoUpdateNSRaidTools = async () => {
+    try {
+      console.log("Auto-updating NS Raid Tools...");
+      isNSInstalling = true; // Set button state
+
+      console.log("Fetching NS Raid Tools release info...");
+      const response = await fetch(
+        "https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest",
+      );
+      const nsData = await response.json();
+      const asset = nsData.assets.find(
+        (asset: any) => asset.content_type === "application/zip",
+      );
+      const downloadUrl = asset.browser_download_url;
+      console.log("Starting download of NS Raid Tools...");
+
+      await download(downloadUrl, "./nsRaidTools.zip", (progress) => {
+        console.log("NS Raid Tools download progress:", progress);
+      });
+
+      console.log("NS Raid Tools download complete, starting extraction...");
+      // Extract immediately without timer
+      await validateAndExtractZip(
+        "./nsRaidTools.zip",
+        wowFolder + "/Interface/Addons",
+      );
+      console.log("NS Raid Tools extraction complete");
+
+      console.log("NS Raid Tools auto-update complete");
+      isNSInstalling = false; // Reset button state on success
+    } catch (error) {
+      console.error("Failed to auto-update NS Raid Tools:", error);
+      isNSInstalling = false; // Reset button state on error
+      throw error;
+    }
+  };
+
+  const autoUpdateLiquidReminders = async () => {
+    try {
+      console.log("Auto-updating Liquid Reminders...");
+      isLRInstalling = true; // Set button state
+
+      console.log("Starting download of Liquid Reminders...");
+      await download(
+        PUBLIC_SERVER_HOST + "/assets/liquidReminders.zip",
+        "./liquidReminders.zip",
+        (progress) => {
+          console.log("Liquid Reminders download progress:", progress);
+        },
+        new Map([["Authorization", apiKey]]),
+      );
+      console.log("Liquid Reminders download complete, starting extraction...");
+
+      // Extract immediately without timer
+      await validateAndExtractZip(
+        "./liquidReminders.zip",
+        wowFolder + "/Interface/Addons",
+      );
+      console.log("Liquid Reminders extraction complete");
+
+      console.log("Liquid Reminders auto-update complete");
+      isLRInstalling = false; // Reset button state on success
+    } catch (error) {
+      console.error("Failed to auto-update Liquid Reminders:", error);
+      isLRInstalling = false; // Reset button state on error
+      throw error;
+    }
+  };
+
+  const checkForUpdates = async () => {
+    console.log(
+      "checkForUpdates called, wowFolder:",
+      wowFolder,
+      "apiKey:",
+      apiKey,
+    );
+    if (!wowFolder || !apiKey) {
+      console.log("Missing wowFolder or apiKey, cannot check for updates");
+      return false;
+    }
+
+    try {
+      const updatesNeeded = [];
+
+      // Check each addon for updates, but handle cases where addons might not be installed
+      try {
+        const addon = await data.addon;
+        console.log("NHF Addon status:", {
+          isInstalled: addon.isInstalled,
+          isCurrent: addon.isCurrent,
+        });
+        if (addon && addon.isInstalled && !addon.isCurrent) {
+          updatesNeeded.push("nhf-addon");
+          console.log("NHF Addon needs update");
+        }
+      } catch (error) {
+        console.log("NHF Addon not available for update check:", error);
+      }
+
+      try {
+        const nsRaidTools = await data.nsRaidTools;
+        console.log("NS Raid Tools status:", {
+          isInstalled: nsRaidTools.isInstalled,
+          isCurrent: nsRaidTools.isCurrent,
+        });
+        if (nsRaidTools && nsRaidTools.isInstalled && !nsRaidTools.isCurrent) {
+          updatesNeeded.push("ns-raid-tools");
+          console.log("NS Raid Tools needs update");
+        }
+      } catch (error) {
+        console.log("NS Raid Tools not available for update check:", error);
+      }
+
+      // Check liquid reminders only if it's installed
+      try {
+        const liquidReminders = await data.liquidReminders;
+        console.log("Liquid Reminders status:", {
+          isInstalled: liquidReminders.isInstalled,
+          isCurrent: liquidReminders.isCurrent,
+        });
+        if (
+          liquidReminders &&
+          liquidReminders.isInstalled &&
+          !liquidReminders.isCurrent
+        ) {
+          updatesNeeded.push("liquid-reminders");
+          console.log("Liquid Reminders needs update");
+        }
+      } catch (error) {
+        // Liquid reminders not installed or path not found - skip it
+        console.log("Liquid Reminders not available for update check:", error);
+      }
+
+      console.log("Updates needed:", updatesNeeded);
+      if (updatesNeeded.length > 0) {
+        updateQueue = updatesNeeded;
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error("Failed to check for updates:", error);
+      return false;
+    }
+  };
+
+  const processUpdateQueue = async () => {
+    console.log(
+      "processUpdateQueue called, isAutoUpdating:",
+      isAutoUpdating,
+      "updateQueue:",
+      updateQueue,
+    );
+    if (isAutoUpdating || updateQueue.length === 0) {
+      console.log(
+        "Cannot process queue - isAutoUpdating:",
+        isAutoUpdating,
+        "queue length:",
+        updateQueue.length,
+      );
+      return;
+    }
+
+    console.log("Starting to process update queue:", updateQueue);
+    isAutoUpdating = true;
+
+    for (const addonName of updateQueue) {
+      try {
+        console.log(`Processing addon: ${addonName}`);
+        currentUpdating = addonName;
+        showNotification(`Auto-updating ${addonName}...`, "success");
+
+        switch (addonName) {
+          case "nhf-addon":
+            console.log("Calling autoUpdateNHFAddon...");
+            await autoUpdateNHFAddon();
+            break;
+          case "ns-raid-tools":
+            console.log("Calling autoUpdateNSRaidTools...");
+            await autoUpdateNSRaidTools();
+            break;
+          case "liquid-reminders":
+            console.log("Calling autoUpdateLiquidReminders...");
+            await autoUpdateLiquidReminders();
+            break;
+        }
+
+        console.log(`Completed auto-update for ${addonName}`);
+        // Wait a bit between updates
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      } catch (error) {
+        console.error(`Failed to auto-update ${addonName}:`, error);
+        showNotification(`Failed to auto-update ${addonName}`, "error");
+      }
+    }
+
+    console.log("All updates complete, clearing queue");
+    updateQueue = [];
+    currentUpdating = "";
+    isAutoUpdating = false;
+
+    // Refresh the page once after all updates are complete
+    showNotification("Auto-updates complete, refreshing...", "success");
+    setTimeout(() => {
+      window.location.reload();
+    }, 1000);
+  };
+
+  const autoUpdateCheck = async () => {
+    console.log("autoUpdateCheck called, autoUpdate enabled:", autoUpdate);
+    if (!autoUpdate) {
+      console.log("Auto-update is disabled, skipping check");
+      return;
+    }
+
+    console.log("Checking for updates...");
+    const hasUpdates = await checkForUpdates();
+    console.log("Has updates:", hasUpdates);
+    if (hasUpdates) {
+      console.log("Updates found, processing queue...");
+      await processUpdateQueue();
+    } else {
+      console.log("No updates needed");
+    }
+  };
+
+  const manualRefresh = async () => {
+    window.location.reload();
   };
 
   const openBackupFolder = async () => {
@@ -489,6 +864,26 @@
         />
       </div>
 
+      <div class="checkbox-group" style="margin-top: 12px;">
+        <input
+          type="checkbox"
+          id="minimize_to_tray"
+          bind:checked={minimizeToTray}
+          onchange={updateMinimizeToTray}
+        />
+        <label for="minimize_to_tray">Hide to Tray Instead of Close</label>
+      </div>
+
+      <div class="checkbox-group" style="margin-top: 8px;">
+        <input
+          type="checkbox"
+          id="auto_update"
+          bind:checked={autoUpdate}
+          onchange={updateAutoUpdateSetting}
+        />
+        <label for="auto_update">Auto Update Addons</label>
+      </div>
+
       <div class="backup-section">
         <h3>Backup WeakAuras</h3>
         <div class="checkbox-group">
@@ -565,6 +960,15 @@
 
     <div class="right-panel">
       <div class="action-buttons">
+        <button
+          type="button"
+          class="refresh-button-full"
+          onclick={manualRefresh}
+          disabled={!wowFolder || !apiKey}
+        >
+          Refresh
+        </button>
+
         <div class="button-group">
           <label for="nhf-addon-btn">NHF Addon</label>
           <button
@@ -637,6 +1041,19 @@
             {/if}
           {/await}
         </div>
+
+        {#if isAutoUpdating}
+          <div class="auto-update-info">
+            <div class="update-status">
+              <span>Auto-updating: {currentUpdating}</span>
+            </div>
+            {#if updateQueue.length > 0}
+              <div class="update-queue">
+                <span>Update queue: {updateQueue.length} addon(s) pending</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
     </div>
   </div>
@@ -1046,6 +1463,58 @@
     font-weight: 500;
     color: #ccc;
     cursor: pointer;
+  }
+
+  .auto-update-info {
+    margin-top: 8px;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: rgba(88, 153, 226, 0.1);
+    border: 1px solid rgba(88, 153, 226, 0.3);
+    border-radius: 6px;
+  }
+
+  .auto-update-info small {
+    color: #5899e2;
+    font-size: 11px;
+    font-weight: 500;
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .update-status,
+  .update-queue {
+    font-size: 11px;
+    color: #5899e2;
+    font-weight: 600;
+    margin-top: 4px;
+  }
+
+  .refresh-button-full {
+    width: 100%;
+    margin: 12px 0;
+    background: #2d3748;
+    color: #e2e8f0;
+    border: 1px solid #4a5568;
+    border-radius: 5px;
+    padding: 8px 16px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 12px;
+  }
+
+  .refresh-button-full:hover:not(:disabled) {
+    background: #4a5568;
+    border-color: #718096;
+    color: white;
+  }
+
+  .refresh-button-full:disabled {
+    background: #444;
+    color: #bbb;
+    border-color: #666;
+    cursor: not-allowed;
   }
 
   .backup-button {

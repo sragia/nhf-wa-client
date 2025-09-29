@@ -6,8 +6,11 @@ use zip::ZipArchive;
 use zip::write::FileOptions;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use tauri::Emitter;
+use tauri::{Emitter, Manager, WindowEvent};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
+use tauri::menu::{Menu, MenuItem};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -531,6 +534,39 @@ async fn backup_weakauras(
     })
 }
 
+// Global state for minimize to tray setting
+struct MinimizeToTrayState {
+    enabled: bool,
+}
+
+#[tauri::command]
+async fn set_minimize_to_tray(
+    state: tauri::State<'_, Mutex<MinimizeToTrayState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    state.enabled = enabled;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_minimize_to_tray(
+    state: tauri::State<'_, Mutex<MinimizeToTrayState>>,
+) -> Result<bool, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    Ok(state.enabled)
+}
+
+#[tauri::command]
+async fn show_window(window: tauri::Window) -> Result<(), String> {
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -541,14 +577,83 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .manage(Mutex::new(MinimizeToTrayState { enabled: false }))
+        .setup(|app| {
+            // Create tray menu
+            let show_item = MenuItem::with_id(app, "show", "Show NHF Aura Manager", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            // Create system tray
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.unminimize();
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } => {
+                            // Show and focus the main window when tray is clicked
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.unminimize();
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             extract_zip,
             read_file,
             validate_zip,
             get_zip_info,
-            backup_weakauras
+            backup_weakauras,
+            set_minimize_to_tray,
+            get_minimize_to_tray,
+            show_window
         ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let app_handle = window.app_handle();
+                
+                // Check if minimize to tray is enabled
+                if let Ok(minimize_state) = app_handle.state::<Mutex<MinimizeToTrayState>>().lock() {
+                    if minimize_state.enabled {
+                        // Prevent default close behavior
+                        api.prevent_close();
+                        
+                        // Hide the window instead of closing
+                        let _ = window.hide();
+                        return;
+                    }
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

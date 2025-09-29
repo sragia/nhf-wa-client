@@ -65,9 +65,11 @@ export const load = async ({ fetch }) => {
                     if (!currentVersion) {
                         data.isCurrent = false;
                         data.currentVersion = 'N/A';
+                        data.isInstalled = false;
                     } else {
                         data.currentVersion = currentVersion;
                         data.isCurrent = compareVersions(data.semVersion, currentVersion) === 0;
+                        data.isInstalled = true;
                     }
                     resolve(data);
                 })
@@ -77,7 +79,8 @@ export const load = async ({ fetch }) => {
                     resolve({
                         isActive: false,
                         isCurrent: false,
-                        currentVersion: currentVersion || 'N/A'
+                        currentVersion: currentVersion || 'N/A',
+                        isInstalled: !!currentVersion
                     });
                 })
             })
@@ -86,14 +89,16 @@ export const load = async ({ fetch }) => {
             fetch('https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest')
                 .then(response => response.json())
                 .then((data) => {
-                    const resolvedData = { isCurrent: false, currentVersion: 'N/A', isActive: true };
+                    const resolvedData = { isCurrent: false, currentVersion: 'N/A', isActive: true, isInstalled: false };
                     getCurrentNSRaidToolsVersion().then((currentVersion) => {
                         if (!currentVersion) {
                             resolvedData.isCurrent = false;
                             resolvedData.currentVersion = 'N/A';
+                            resolvedData.isInstalled = false;
                         } else {
                             resolvedData.currentVersion = currentVersion;
                             resolvedData.isCurrent = compareVersions(data.tag_name, currentVersion) === 0;
+                            resolvedData.isInstalled = true;
                         }
                         resolve(resolvedData);
                     }).catch((error) => {
@@ -102,7 +107,8 @@ export const load = async ({ fetch }) => {
                             resolve({
                                 isActive: false,
                                 isCurrent: false,
-                                currentVersion: currentVersion || 'N/A'
+                                currentVersion: currentVersion || 'N/A',
+                                isInstalled: !!currentVersion
                             })
                         })
                     })
@@ -116,9 +122,11 @@ export const load = async ({ fetch }) => {
                     if (!currentVersion) {
                         data.isCurrent = false;
                         data.currentVersion = 'N/A';
+                        data.isInstalled = false;
                     } else {
                         data.currentVersion = currentVersion;
                         data.isCurrent = compareVersions(data.semVersion, currentVersion) === 0;
+                        data.isInstalled = true;
                     }
                     resolve(data);
                 })
@@ -128,7 +136,8 @@ export const load = async ({ fetch }) => {
                     resolve({
                         isActive: false,
                         isCurrent: false,
-                        currentVersion: currentVersion || 'N/A'
+                        currentVersion: currentVersion || 'N/A',
+                        isInstalled: !!currentVersion
                     });
                 })
             })

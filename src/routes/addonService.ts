@@ -8,7 +8,7 @@ export async function getCurrentAddonVersion(): Promise<string | false> {
         if (store) {
             const storedFolder = await store.get('wow_folder');
             if (storedFolder) {
-                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NHFAuraManager/NHFAuraManager.toc' });
+                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/Addons/NHFAuraManager/NHFAuraManager.toc' }) as string;
                 return extractVersionFromToc(file);
             }
         }
@@ -45,7 +45,8 @@ export async function getCurrentLiquidRemindersVersion(): Promise<string | false
             }
         }
     } catch (error) {
-        console.error(error);
+        // Liquid Reminders not installed - this is normal, don't log as error
+        console.log('Liquid Reminders not installed or file not found');
     }
     return false;
 }
