@@ -317,17 +317,10 @@
     if (!wowFolder || !apiKey || isInstalling) return;
     try {
       isInstalling = true;
-      let timer: number | null = null;
       await download(
         PUBLIC_SERVER_HOST + "/assets/addon.zip",
         "./addon.zip",
         (progress) => {
-          if (timer) {
-            clearTimeout(timer);
-          }
-          timer = setTimeout(() => {
-            extractAddonZip();
-          }, 1000);
           console.log(
             progress.progress,
             progress.progressTotal,
@@ -337,6 +330,7 @@
         },
         new Map([["Authorization", apiKey]]),
       );
+      await extractAddonZip();
     } catch (error) {
       isInstalling = false;
       resetInstallBtnText(true);
@@ -376,14 +370,7 @@
         (asset: any) => asset.content_type === "application/zip",
       );
       const downloadUrl = asset.browser_download_url;
-      let timer: number | null = null;
       await download(downloadUrl, "./nsRaidTools.zip", (progress) => {
-        if (timer) {
-          clearTimeout(timer);
-        }
-        timer = setTimeout(() => {
-          extractNSRaidToolsZip();
-        }, 1000);
         console.log(
           progress.progress,
           progress.progressTotal,
@@ -391,6 +378,7 @@
           progress,
         );
       });
+      await extractNSRaidToolsZip();
     } catch (error) {
       isNSInstalling = false;
       resetNSInstallBtnText(true);
