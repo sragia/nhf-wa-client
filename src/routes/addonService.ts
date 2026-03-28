@@ -34,6 +34,22 @@ export async function getCurrentNSRaidToolsVersion(): Promise<string | false> {
     return false;
 }
 
+export async function getCurrentM33kAurasVersion(): Promise<string | false> {
+    const store = await loadStore('store.json');
+    try {
+        if (store) {
+            const storedFolder = await store.get('wow_folder');
+            if (storedFolder) {
+                const file = await invoke('read_file', { filePath: storedFolder + '/Interface/AddOns/M33kAuras/M33kAuras.toc' }) as string;
+                return extractVersionFromToc(file);
+            }
+        }
+    } catch (error) {
+        console.error(error);
+    }
+    return false;
+}
+
 export async function getCurrentLiquidRemindersVersion(): Promise<string | false> {
     const store = await loadStore('store.json');
     try {

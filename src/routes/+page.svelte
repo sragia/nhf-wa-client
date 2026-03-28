@@ -14,9 +14,11 @@
   let apiKey = $state("");
   let isInstalling = $state(false);
   let isNSInstalling = $state(false);
+  let isM33Installing = $state(false);
   let isLRInstalling = $state(false);
   let isUpdateAvailable = $state(false);
   let isNSUpdateAvailable = $state(false);
+  let isM33UpdateAvailable = $state(false);
   let isLRUpdateAvailable = $state(false);
 
   let store: any = null;
@@ -57,6 +59,7 @@
   // Button text state variables
   let addonButtonText = $state("Re-Install");
   let nsButtonText = $state("Re-Install");
+  let m33ButtonText = $state("Re-Install");
   let lrButtonText = $state("Re-Install");
 
   function getAddonButtonText() {
@@ -79,6 +82,16 @@
           : nsButtonText;
   }
 
+  function getM33ButtonText() {
+    return !wowFolder
+      ? "Set Folder"
+      : !apiKey
+        ? "Set API Key"
+        : isM33Installing
+          ? "Downloading..."
+          : m33ButtonText;
+  }
+
   function getLRButtonText() {
     return !wowFolder
       ? "Set Folder"
@@ -92,11 +105,13 @@
   const check = async () => {
     const addon = await data.addon;
     const nsRaidTools = await data.nsRaidTools;
+    const m33kAuras = await data.m33kAuras;
     const liquidReminders = await data.liquidReminders;
 
     // Set update availability flags
     isUpdateAvailable = !addon.isCurrent;
     isNSUpdateAvailable = !nsRaidTools.isCurrent;
+    isM33UpdateAvailable = !m33kAuras.isCurrent;
     isLRUpdateAvailable = !liquidReminders.isCurrent;
 
     // Set button text based on installation and update status
@@ -114,6 +129,14 @@
       nsButtonText = "Update";
     } else {
       nsButtonText = "Re-Install";
+    }
+
+    if (!m33kAuras.isInstalled) {
+      m33ButtonText = "Install";
+    } else if (!m33kAuras.isCurrent) {
+      m33ButtonText = "Update";
+    } else {
+      m33ButtonText = "Re-Install";
     }
 
     if (!liquidReminders.isInstalled) {
@@ -305,6 +328,13 @@
     }, 4000);
   };
 
+  const resetM33InstallBtnText = (failed = false) => {
+    setTimeout(() => {
+      isM33Installing = false;
+      isM33UpdateAvailable = failed;
+    }, 4000);
+  };
+
   const resetLRInstallBtnText = (failed = false) => {
     setTimeout(() => {
       isLRInstalling = false;
@@ -400,6 +430,54 @@
       resetNSInstallBtnText(true);
       showNotification(
         "Failed to extract NS Raid Tools. Please check your WoW folder path and try again.",
+      );
+      console.error(error);
+    }
+  }
+
+  // --- M33kAuras ZIP update logic ---
+  const updateM33kAuras = async () => {
+    if (!wowFolder || !apiKey || isM33Installing) return;
+    try {
+      isM33Installing = true;
+      const response = await fetch(
+        "https://api.github.com/repos/m33shoq/M33kAuras/releases/latest",
+      );
+      const m33Data = await response.json();
+      const asset = m33Data.assets.find(
+        (asset: any) => asset.content_type === "application/zip",
+      );
+      const downloadUrl = asset.browser_download_url;
+      await download(downloadUrl, "./m33kAuras.zip", (progress) => {
+        console.log(
+          progress.progress,
+          progress.progressTotal,
+          progress.transferSpeed,
+          progress,
+        );
+      });
+      await extractM33kAurasZip();
+    } catch (error) {
+      isM33Installing = false;
+      resetM33InstallBtnText(true);
+      showNotification(
+        "Failed to download M33kAuras. Please check your connection and try again.",
+      );
+    }
+  };
+
+  async function extractM33kAurasZip() {
+    try {
+      await validateAndExtractZip(
+        "./m33kAuras.zip",
+        wowFolder + "/Interface/AddOns",
+      );
+      resetM33InstallBtnText();
+      window.location.reload();
+    } catch (error: any) {
+      resetM33InstallBtnText(true);
+      showNotification(
+        "Failed to extract M33kAuras. Please check your WoW folder path and try again.",
       );
       console.error(error);
     }
@@ -585,6 +663,42 @@
     }
   };
 
+  const autoUpdateM33kAuras = async () => {
+    try {
+      console.log("Auto-updating M33kAuras...");
+      isM33Installing = true;
+
+      console.log("Fetching M33kAuras release info...");
+      const response = await fetch(
+        "https://api.github.com/repos/m33shoq/M33kAuras/releases/latest",
+      );
+      const m33Data = await response.json();
+      const asset = m33Data.assets.find(
+        (asset: any) => asset.content_type === "application/zip",
+      );
+      const downloadUrl = asset.browser_download_url;
+      console.log("Starting download of M33kAuras...");
+
+      await download(downloadUrl, "./m33kAuras.zip", (progress) => {
+        console.log("M33kAuras download progress:", progress);
+      });
+
+      console.log("M33kAuras download complete, starting extraction...");
+      await validateAndExtractZip(
+        "./m33kAuras.zip",
+        wowFolder + "/Interface/AddOns",
+      );
+      console.log("M33kAuras extraction complete");
+
+      console.log("M33kAuras auto-update complete");
+      isM33Installing = false;
+    } catch (error) {
+      console.error("Failed to auto-update M33kAuras:", error);
+      isM33Installing = false;
+      throw error;
+    }
+  };
+
   const autoUpdateLiquidReminders = async () => {
     try {
       console.log("Auto-updating Liquid Reminders...");
@@ -661,6 +775,20 @@
         console.log("NS Raid Tools not available for update check:", error);
       }
 
+      try {
+        const m33kAuras = await data.m33kAuras;
+        console.log("M33kAuras status:", {
+          isInstalled: m33kAuras.isInstalled,
+          isCurrent: m33kAuras.isCurrent,
+        });
+        if (m33kAuras && m33kAuras.isInstalled && !m33kAuras.isCurrent) {
+          updatesNeeded.push("m33k-auras");
+          console.log("M33kAuras needs update");
+        }
+      } catch (error) {
+        console.log("M33kAuras not available for update check:", error);
+      }
+
       // Check liquid reminders only if it's installed
       try {
         const liquidReminders = await data.liquidReminders;
@@ -727,6 +855,10 @@
           case "ns-raid-tools":
             console.log("Calling autoUpdateNSRaidTools...");
             await autoUpdateNSRaidTools();
+            break;
+          case "m33k-auras":
+            console.log("Calling autoUpdateM33kAuras...");
+            await autoUpdateM33kAuras();
             break;
           case "liquid-reminders":
             console.log("Calling autoUpdateLiquidReminders...");
@@ -1017,6 +1149,18 @@
         </div>
 
         <div class="button-group">
+          <label for="m33k-auras-btn">M33kAuras</label>
+          <button
+            id="m33k-auras-btn"
+            type="button"
+            disabled={!wowFolder || !apiKey || isM33Installing}
+            class:glowing={isM33UpdateAvailable}
+            class:disabled-btn={!wowFolder || !apiKey}
+            onclick={updateM33kAuras}>{getM33ButtonText()}</button
+          >
+        </div>
+
+        <div class="button-group">
           <label for="liquid-reminders-btn">Liquid Reminders</label>
           <button
             id="liquid-reminders-btn"
@@ -1148,6 +1292,37 @@
           ></div>
           <div>
             <span>NS Raid Tools</span>
+            <span>Version: {addon.currentVersion}</span>
+          </div>
+        </div>
+      {/await}
+      {#await data.m33kAuras}
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          ><path
+            fill="currentColor"
+            d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+            ><animateTransform
+              attributeName="transform"
+              dur="0.75s"
+              repeatCount="indefinite"
+              type="rotate"
+              values="0 12 12;360 12 12"
+            /></path
+          ></svg
+        >
+      {:then addon}
+        <div class="indicator">
+          <div
+            class="dot"
+            class:gray={!addon.isActive}
+            class:green={addon.isCurrent}
+          ></div>
+          <div>
+            <span>M33kAuras</span>
             <span>Version: {addon.currentVersion}</span>
           </div>
         </div>

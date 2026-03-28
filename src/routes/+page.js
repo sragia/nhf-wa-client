@@ -1,7 +1,7 @@
 import { PUBLIC_SERVER_HOST } from "$env/static/public";
 import { getVersion } from '@tauri-apps/api/app';
 import { load as loadStore } from '@tauri-apps/plugin-store';
-import { getCurrentAddonVersion, getCurrentNSRaidToolsVersion, getCurrentLiquidRemindersVersion, compareVersions } from './addonService';
+import { getCurrentAddonVersion, getCurrentNSRaidToolsVersion, getCurrentM33kAurasVersion, getCurrentLiquidRemindersVersion, compareVersions } from './addonService';
 
 /**
  * @param {{ fetch: typeof window.fetch }} param0
@@ -104,6 +104,35 @@ export const load = async ({ fetch }) => {
                     }).catch((error) => {
                         console.error(error);
                         getCurrentNSRaidToolsVersion().then((currentVersion) => {
+                            resolve({
+                                isActive: false,
+                                isCurrent: false,
+                                currentVersion: currentVersion || 'N/A',
+                                isInstalled: !!currentVersion
+                            })
+                        })
+                    })
+                })
+        }),
+        m33kAuras: new Promise((resolve) => {
+            fetch('https://api.github.com/repos/m33shoq/M33kAuras/releases/latest')
+                .then(response => response.json())
+                .then((data) => {
+                    const resolvedData = { isCurrent: false, currentVersion: 'N/A', isActive: true, isInstalled: false };
+                    getCurrentM33kAurasVersion().then((currentVersion) => {
+                        if (!currentVersion) {
+                            resolvedData.isCurrent = false;
+                            resolvedData.currentVersion = 'N/A';
+                            resolvedData.isInstalled = false;
+                        } else {
+                            resolvedData.currentVersion = currentVersion;
+                            resolvedData.isCurrent = compareVersions(data.tag_name, currentVersion) === 0;
+                            resolvedData.isInstalled = true;
+                        }
+                        resolve(resolvedData);
+                    }).catch((error) => {
+                        console.error(error);
+                        getCurrentM33kAurasVersion().then((currentVersion) => {
                             resolve({
                                 isActive: false,
                                 isCurrent: false,
