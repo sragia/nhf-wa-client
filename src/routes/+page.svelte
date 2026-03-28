@@ -10,7 +10,25 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open as openShell } from "@tauri-apps/plugin-shell";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { fetchJsonWithRetry } from "./networkRetry.js";
+  import { getPendingAutoUpdateIds } from "./addonUpdateCheck.js";
+
+  async function titleBarMinimize() {
+    try {
+      await getCurrentWindow().minimize();
+    } catch {
+      /* e.g. plain Vite dev without Tauri */
+    }
+  }
+
+  async function titleBarClose() {
+    try {
+      await getCurrentWindow().close();
+    } catch {
+      /* e.g. plain Vite dev without Tauri */
+    }
+  }
 
   let wowFolder = $state("");
   let apiKey = $state("");
@@ -31,8 +49,6 @@
   let backupOnStartup = $state(false);
   let backupAllData = $state(false);
   let isBackingUp = $state(false);
-  let backupProgress = $state(0);
-  let backupStatus = $state("");
   let lastBackupTime = $state("");
   let lastAppStartTime = $state("");
 
@@ -47,6 +63,88 @@
 
   // Startup functionality
   let startOnStartup = $state(false);
+
+  type InstallDockPhase = "download" | "extract" | "backup";
+
+  let installDock = $state({
+    open: false,
+    name: "",
+    phase: "download" as InstallDockPhase,
+    percent: 0,
+    detail: "",
+  });
+
+  function formatBytes(n: number): string {
+    if (!Number.isFinite(n) || n < 0) return "";
+    if (n < 1024) return `${Math.round(n)} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function installDockFromProgress(p: Record<string, unknown>) {
+    const cur = Number(p.progress) || 0;
+    const total = Number(p.progressTotal) || 0;
+    const speed = Number(p.transferSpeed) || 0;
+    const pct =
+      total > 0 ? Math.min(100, Math.round((cur / total) * 100)) : 0;
+    let detail = "";
+    if (total > 0) {
+      detail = `${formatBytes(cur)} / ${formatBytes(total)}`;
+      if (speed > 0) detail += ` · ${formatBytes(speed)}/s`;
+    } else if (speed > 0) {
+      detail = `${formatBytes(speed)}/s`;
+    } else {
+      detail = "Downloading…";
+    }
+    installDock = {
+      ...installDock,
+      open: true,
+      phase: "download",
+      percent: pct,
+      detail,
+    };
+  }
+
+  function openInstallDock(name: string, initialDetail = "Preparing…") {
+    installDock = {
+      open: true,
+      name,
+      phase: "download",
+      percent: 0,
+      detail: initialDetail,
+    };
+  }
+
+  function installDockExtracting() {
+    installDock = {
+      ...installDock,
+      open: true,
+      phase: "extract",
+      percent: 100,
+      detail: "Unpacking into your WoW AddOns folder…",
+    };
+  }
+
+  function closeInstallDock() {
+    installDock = {
+      open: false,
+      name: "",
+      phase: "download",
+      percent: 0,
+      detail: "",
+    };
+  }
+
+  function installDockFromBackup(progress: number, status: string) {
+    const pct = Math.min(100, Math.max(0, Number(progress) || 0));
+    installDock = {
+      open: true,
+      name: "WeakAuras backup",
+      phase: "backup",
+      percent: pct,
+      detail: status.trim() ? status : "Backing up…",
+    };
+  }
 
   function showNotification(
     message: string,
@@ -126,6 +224,8 @@
           : lrButtonText;
   }
 
+  let { data } = $props();
+
   const check = async () => {
     const addon = await data.addon;
     const nsRaidTools = await data.nsRaidTools;
@@ -173,6 +273,16 @@
   };
   check();
 
+  async function refreshPageData() {
+    closeInstallDock();
+    try {
+      await invalidateAll();
+      await check();
+    } catch (e) {
+      console.error("refreshPageData:", e);
+    }
+  }
+
   const setupStore = async () => {
     store = await load("store.json");
     if (store) {
@@ -187,8 +297,13 @@
       const storedAutoUpdate = await store.get("auto_update");
       const storedStartOnStartup = await store.get("start_on_startup");
 
-      if (storedFolder) {
-        wowFolder = storedFolder;
+      if (storedFolder && typeof storedFolder === "string") {
+        if (isRetailWowPath(storedFolder)) {
+          wowFolder = normalizeWowFolderPath(storedFolder);
+        } else {
+          wowFolder = "";
+          await store.set("wow_folder", "");
+        }
       }
       if (storedApiKey) {
         apiKey = storedApiKey;
@@ -239,10 +354,10 @@
   const setupBackupProgressListener = async () => {
     unlistenBackupProgress = await listen("backup-progress", (event: any) => {
       const progressData = event.payload;
-      backupProgress = progressData.progress;
-      backupStatus = progressData.status;
-
-      // Don't show file count to user - just show the status message
+      installDockFromBackup(
+        Number(progressData.progress) || 0,
+        String(progressData.status ?? ""),
+      );
     });
   };
 
@@ -311,8 +426,6 @@
     }
   });
 
-  let { data } = $props();
-
   // Cleanup event listener on component destroy
   $effect(() => {
     return () => {
@@ -325,18 +438,53 @@
     };
   });
 
+  function normalizeWowFolderPath(path: string): string {
+    return path.trim().replace(/[/\\]+$/, "");
+  }
+
+  /** Retail install folder name must be the path suffix (case-insensitive). */
+  function isRetailWowPath(path: string): boolean {
+    const n = normalizeWowFolderPath(path);
+    return n.length > 0 && n.toLowerCase().endsWith("_retail_");
+  }
+
+  /** Saves WoW folder when valid; on failure shows a toast and restores the last stored path. */
+  async function persistWowFolder(path: string): Promise<boolean> {
+    if (!store) return false;
+    const n = normalizeWowFolderPath(path);
+    if (!n) {
+      await store.set("wow_folder", "");
+      wowFolder = "";
+      await refreshPageData();
+      return true;
+    }
+    if (!isRetailWowPath(n)) {
+      showNotification(
+        "WoW folder must end with _retail_ (your retail game directory).",
+        "error",
+      );
+      const prev = await store.get("wow_folder");
+      wowFolder = typeof prev === "string" ? prev : "";
+      return false;
+    }
+    await store.set("wow_folder", n);
+    wowFolder = n;
+    await refreshPageData();
+    return true;
+  }
+
   const openFolder = async () => {
     if (!store) return;
     const folder = await open({
       directory: true,
       multiple: false,
     });
-    if (folder) {
-      store.set("wow_folder", folder);
-      wowFolder = folder;
-      window.location.reload();
-    }
+    if (typeof folder === "string") await persistWowFolder(folder);
   };
+
+  async function onWowFolderBlur() {
+    await persistWowFolder(wowFolder);
+  }
 
   const resetInstallBtnText = (failed = false) => {
     setTimeout(() => {
@@ -371,10 +519,12 @@
     if (!wowFolder || !apiKey || isInstalling) return;
     try {
       isInstalling = true;
+      openInstallDock("NHF Addon");
       await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/addon.zip",
         "./addon.zip",
         (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
           console.log(
             progress.progress,
             progress.progressTotal,
@@ -384,8 +534,10 @@
         },
         new Map([["Authorization", apiKey]]),
       );
+      installDockExtracting();
       await extractAddonZip();
     } catch (error) {
+      closeInstallDock();
       isInstalling = false;
       resetInstallBtnText(true);
       showNotification(
@@ -400,9 +552,10 @@
         "./addon.zip",
         wowFolder + "/Interface/Addons",
       );
-      resetInstallBtnText();
-      window.location.reload();
+      await refreshPageData();
+      isInstalling = false;
     } catch (error: any) {
+      closeInstallDock();
       resetInstallBtnText(true);
       showNotification(
         "Failed to extract NHF Addon. Please check your WoW folder path and try again.",
@@ -416,6 +569,7 @@
     if (!wowFolder || !apiKey || isNSInstalling) return;
     try {
       isNSInstalling = true;
+      openInstallDock("NS Raid Tools", "Fetching latest release…");
       const nsData = await fetchJsonWithRetry(
         "https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest",
       );
@@ -426,16 +580,25 @@
       if (!downloadUrl) {
         throw new Error("No NS Raid Tools zip in latest release");
       }
-      await downloadWithRetry(downloadUrl, "./nsRaidTools.zip", (progress) => {
-        console.log(
-          progress.progress,
-          progress.progressTotal,
-          progress.transferSpeed,
-          progress,
-        );
-      }, undefined);
+      installDock = { ...installDock, detail: "Downloading…" };
+      await downloadWithRetry(
+        downloadUrl,
+        "./nsRaidTools.zip",
+        (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
+          console.log(
+            progress.progress,
+            progress.progressTotal,
+            progress.transferSpeed,
+            progress,
+          );
+        },
+        undefined,
+      );
+      installDockExtracting();
       await extractNSRaidToolsZip();
     } catch (error) {
+      closeInstallDock();
       isNSInstalling = false;
       resetNSInstallBtnText(true);
       showNotification(
@@ -450,9 +613,10 @@
         "./nsRaidTools.zip",
         wowFolder + "/Interface/Addons",
       );
-      resetNSInstallBtnText();
-      window.location.reload();
+      await refreshPageData();
+      isNSInstalling = false;
     } catch (error: any) {
+      closeInstallDock();
       resetNSInstallBtnText(true);
       showNotification(
         "Failed to extract NS Raid Tools. Please check your WoW folder path and try again.",
@@ -466,6 +630,7 @@
     if (!wowFolder || !apiKey || isM33Installing) return;
     try {
       isM33Installing = true;
+      openInstallDock("M33kAuras", "Fetching latest release…");
       const m33Data = await fetchJsonWithRetry(
         "https://api.github.com/repos/m33shoq/M33kAuras/releases/latest",
       );
@@ -476,16 +641,25 @@
       if (!downloadUrl) {
         throw new Error("No M33kAuras zip in latest release");
       }
-      await downloadWithRetry(downloadUrl, "./m33kAuras.zip", (progress) => {
-        console.log(
-          progress.progress,
-          progress.progressTotal,
-          progress.transferSpeed,
-          progress,
-        );
-      }, undefined);
+      installDock = { ...installDock, detail: "Downloading…" };
+      await downloadWithRetry(
+        downloadUrl,
+        "./m33kAuras.zip",
+        (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
+          console.log(
+            progress.progress,
+            progress.progressTotal,
+            progress.transferSpeed,
+            progress,
+          );
+        },
+        undefined,
+      );
+      installDockExtracting();
       await extractM33kAurasZip();
     } catch (error) {
+      closeInstallDock();
       isM33Installing = false;
       resetM33InstallBtnText(true);
       showNotification(
@@ -500,9 +674,10 @@
         "./m33kAuras.zip",
         wowFolder + "/Interface/AddOns",
       );
-      resetM33InstallBtnText();
-      window.location.reload();
+      await refreshPageData();
+      isM33Installing = false;
     } catch (error: any) {
+      closeInstallDock();
       resetM33InstallBtnText(true);
       showNotification(
         "Failed to extract M33kAuras. Please check your WoW folder path and try again.",
@@ -516,12 +691,13 @@
     if (!wowFolder || !apiKey || isLRInstalling) return;
     try {
       isLRInstalling = true;
-      let downloadComplete = false;
+      openInstallDock("Liquid Reminders");
 
       await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/liquidReminders.zip",
         "./liquidReminders.zip",
         (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
           console.log(
             progress.progress,
             progress.progressTotal,
@@ -533,7 +709,7 @@
       );
 
       console.log("Liquid Reminders download complete, starting extraction...");
-      downloadComplete = true;
+      installDockExtracting();
 
       // Extract immediately after download completes
       await validateAndExtractZip(
@@ -542,11 +718,11 @@
       );
 
       console.log("Liquid Reminders extraction complete");
+      await refreshPageData();
       isLRInstalling = false;
-      resetLRInstallBtnText();
-      window.location.reload();
     } catch (error) {
       console.error("Failed to update Liquid Reminders:", error);
+      closeInstallDock();
       isLRInstalling = false;
       resetLRInstallBtnText(true);
       showNotification(
@@ -558,7 +734,7 @@
   const updateKey = async () => {
     if (!store) return;
     await store.set("api_key", apiKey);
-    window.location.reload();
+    await refreshPageData();
   };
 
   const updateClient = async () => {
@@ -582,13 +758,16 @@
         return;
       } catch (error: unknown) {
         const msg =
-          error instanceof Error ? error.message : String(error ?? "Unknown error");
+          error instanceof Error
+            ? error.message
+            : String(error ?? "Unknown error");
         if (attempt === maxAttempts) {
           console.error(error);
           showNotification(
             msg.length > 160
               ? `${msg.slice(0, 160)}…`
-              : msg || "Client update failed. Check your connection and try again.",
+              : msg ||
+                  "Client update failed. Check your connection and try again.",
             "error",
           );
           return;
@@ -650,17 +829,20 @@
     try {
       console.log("Auto-updating NHF Addon...");
       isInstalling = true; // Set button state
+      openInstallDock("NHF Addon (auto-update)");
 
       console.log("Starting download of NHF Addon...");
       await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/addon.zip",
         "./addon.zip",
         (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
           console.log("NHF Addon download progress:", progress);
         },
         new Map([["Authorization", apiKey]]),
       );
       console.log("NHF Addon download complete, starting extraction...");
+      installDockExtracting();
 
       // Extract immediately without timer
       await validateAndExtractZip(
@@ -673,6 +855,7 @@
       isInstalling = false; // Reset button state on success
     } catch (error) {
       console.error("Failed to auto-update NHF Addon:", error);
+      closeInstallDock();
       isInstalling = false; // Reset button state on error
       throw error;
     }
@@ -682,6 +865,7 @@
     try {
       console.log("Auto-updating NS Raid Tools...");
       isNSInstalling = true; // Set button state
+      openInstallDock("NS Raid Tools (auto-update)", "Fetching latest release…");
 
       console.log("Fetching NS Raid Tools release info...");
       const nsData = await fetchJsonWithRetry(
@@ -695,12 +879,20 @@
         throw new Error("No NS Raid Tools zip in latest release");
       }
       console.log("Starting download of NS Raid Tools...");
+      installDock = { ...installDock, detail: "Downloading…" };
 
-      await downloadWithRetry(downloadUrl, "./nsRaidTools.zip", (progress) => {
-        console.log("NS Raid Tools download progress:", progress);
-      }, undefined);
+      await downloadWithRetry(
+        downloadUrl,
+        "./nsRaidTools.zip",
+        (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
+          console.log("NS Raid Tools download progress:", progress);
+        },
+        undefined,
+      );
 
       console.log("NS Raid Tools download complete, starting extraction...");
+      installDockExtracting();
       // Extract immediately without timer
       await validateAndExtractZip(
         "./nsRaidTools.zip",
@@ -712,6 +904,7 @@
       isNSInstalling = false; // Reset button state on success
     } catch (error) {
       console.error("Failed to auto-update NS Raid Tools:", error);
+      closeInstallDock();
       isNSInstalling = false; // Reset button state on error
       throw error;
     }
@@ -721,6 +914,7 @@
     try {
       console.log("Auto-updating M33kAuras...");
       isM33Installing = true;
+      openInstallDock("M33kAuras (auto-update)", "Fetching latest release…");
 
       console.log("Fetching M33kAuras release info...");
       const m33Data = await fetchJsonWithRetry(
@@ -734,12 +928,20 @@
         throw new Error("No M33kAuras zip in latest release");
       }
       console.log("Starting download of M33kAuras...");
+      installDock = { ...installDock, detail: "Downloading…" };
 
-      await downloadWithRetry(downloadUrl, "./m33kAuras.zip", (progress) => {
-        console.log("M33kAuras download progress:", progress);
-      }, undefined);
+      await downloadWithRetry(
+        downloadUrl,
+        "./m33kAuras.zip",
+        (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
+          console.log("M33kAuras download progress:", progress);
+        },
+        undefined,
+      );
 
       console.log("M33kAuras download complete, starting extraction...");
+      installDockExtracting();
       await validateAndExtractZip(
         "./m33kAuras.zip",
         wowFolder + "/Interface/AddOns",
@@ -750,6 +952,7 @@
       isM33Installing = false;
     } catch (error) {
       console.error("Failed to auto-update M33kAuras:", error);
+      closeInstallDock();
       isM33Installing = false;
       throw error;
     }
@@ -759,17 +962,20 @@
     try {
       console.log("Auto-updating Liquid Reminders...");
       isLRInstalling = true; // Set button state
+      openInstallDock("Liquid Reminders (auto-update)");
 
       console.log("Starting download of Liquid Reminders...");
       await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/liquidReminders.zip",
         "./liquidReminders.zip",
         (progress) => {
+          installDockFromProgress(progress as Record<string, unknown>);
           console.log("Liquid Reminders download progress:", progress);
         },
         new Map([["Authorization", apiKey]]),
       );
       console.log("Liquid Reminders download complete, starting extraction...");
+      installDockExtracting();
 
       // Extract immediately without timer
       await validateAndExtractZip(
@@ -782,6 +988,7 @@
       isLRInstalling = false; // Reset button state on success
     } catch (error) {
       console.error("Failed to auto-update Liquid Reminders:", error);
+      closeInstallDock();
       isLRInstalling = false; // Reset button state on error
       throw error;
     }
@@ -800,72 +1007,7 @@
     }
 
     try {
-      await invalidateAll();
-      const updatesNeeded = [];
-
-      // Check each addon for updates, but handle cases where addons might not be installed
-      try {
-        const addon = await data.addon;
-        console.log("NHF Addon status:", {
-          isInstalled: addon.isInstalled,
-          isCurrent: addon.isCurrent,
-        });
-        if (addon && addon.isInstalled && !addon.isCurrent) {
-          updatesNeeded.push("nhf-addon");
-          console.log("NHF Addon needs update");
-        }
-      } catch (error) {
-        console.log("NHF Addon not available for update check:", error);
-      }
-
-      try {
-        const nsRaidTools = await data.nsRaidTools;
-        console.log("NS Raid Tools status:", {
-          isInstalled: nsRaidTools.isInstalled,
-          isCurrent: nsRaidTools.isCurrent,
-        });
-        if (nsRaidTools && nsRaidTools.isInstalled && !nsRaidTools.isCurrent) {
-          updatesNeeded.push("ns-raid-tools");
-          console.log("NS Raid Tools needs update");
-        }
-      } catch (error) {
-        console.log("NS Raid Tools not available for update check:", error);
-      }
-
-      try {
-        const m33kAuras = await data.m33kAuras;
-        console.log("M33kAuras status:", {
-          isInstalled: m33kAuras.isInstalled,
-          isCurrent: m33kAuras.isCurrent,
-        });
-        if (m33kAuras && m33kAuras.isInstalled && !m33kAuras.isCurrent) {
-          updatesNeeded.push("m33k-auras");
-          console.log("M33kAuras needs update");
-        }
-      } catch (error) {
-        console.log("M33kAuras not available for update check:", error);
-      }
-
-      // Check liquid reminders only if it's installed
-      try {
-        const liquidReminders = await data.liquidReminders;
-        console.log("Liquid Reminders status:", {
-          isInstalled: liquidReminders.isInstalled,
-          isCurrent: liquidReminders.isCurrent,
-        });
-        if (
-          liquidReminders &&
-          liquidReminders.isInstalled &&
-          !liquidReminders.isCurrent
-        ) {
-          updatesNeeded.push("liquid-reminders");
-          console.log("Liquid Reminders needs update");
-        }
-      } catch (error) {
-        // Liquid reminders not installed or path not found - skip it
-        console.log("Liquid Reminders not available for update check:", error);
-      }
-
+      const updatesNeeded = await getPendingAutoUpdateIds(apiKey);
       console.log("Updates needed:", updatesNeeded);
       if (updatesNeeded.length > 0) {
         updateQueue = updatesNeeded;
@@ -937,11 +1079,8 @@
     currentUpdating = "";
     isAutoUpdating = false;
 
-    // Refresh the page once after all updates are complete
-    showNotification("Auto-updates complete, refreshing...", "success");
-    setTimeout(() => {
-      window.location.reload();
-    }, 1000);
+    await refreshPageData();
+    showNotification("Auto-updates complete.", "success");
   };
 
   const autoUpdateCheck = async () => {
@@ -963,7 +1102,7 @@
   };
 
   const manualRefresh = async () => {
-    window.location.reload();
+    await refreshPageData();
   };
 
   const openBackupFolder = async () => {
@@ -985,8 +1124,13 @@
 
     try {
       isBackingUp = true;
-      backupProgress = 0;
-      backupStatus = "Starting backup...";
+      installDock = {
+        open: true,
+        name: "WeakAuras backup",
+        phase: "backup",
+        percent: 0,
+        detail: "Starting backup…",
+      };
 
       const result = (await invoke("backup_weakauras", {
         wowFolder,
@@ -995,36 +1139,76 @@
 
       if (result.error) {
         showNotification(result.error, "error");
-        backupStatus = "Backup failed";
+        installDock = {
+          ...installDock,
+          open: true,
+          phase: "backup",
+          detail: result.error,
+        };
       } else {
-        backupProgress = result.progress;
-        backupStatus = result.status;
+        installDockFromBackup(
+          Number(result.progress) || installDock.percent,
+          String(result.status ?? ""),
+        );
         if (result.completed) {
-          // Save the backup timestamp
           const now = new Date();
           lastBackupTime = now.toLocaleString();
           if (store) {
             await store.set("last_backup_time", lastBackupTime);
           }
           showNotification("Backup completed successfully!", "success");
+          installDock = {
+            ...installDock,
+            open: true,
+            phase: "backup",
+            percent: 100,
+            detail: String(result.status ?? "Backup complete"),
+          };
         }
       }
     } catch (error: any) {
       console.error("Backup error:", error);
       showNotification(`Backup failed: ${error}`, "error");
-      backupStatus = "Backup failed";
+      installDock = {
+        ...installDock,
+        open: true,
+        phase: "backup",
+        detail: "Backup failed",
+      };
     } finally {
       isBackingUp = false;
       setTimeout(() => {
-        backupProgress = 0;
-        backupStatus = "";
-      }, 3000);
+        if (installDock.phase === "backup") {
+          closeInstallDock();
+        }
+      }, 2800);
     }
   };
 </script>
 
-<meta http-equiv="refresh" content="300" />
 <main>
+  {#snippet rowAwaitSpinner()}
+    <svg
+      class="row-status-spinner"
+      xmlns="http://www.w3.org/2000/svg"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      ><path
+        fill="currentColor"
+        d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
+        ><animateTransform
+          attributeName="transform"
+          dur="0.75s"
+          repeatCount="indefinite"
+          type="rotate"
+          values="0 12 12;360 12 12"
+        /></path
+      ></svg
+    >
+  {/snippet}
+
   {#if notification.show}
     <div
       class="notification"
@@ -1039,65 +1223,134 @@
     </div>
   {/if}
 
-  <div class="header">
-    <img src="/icon.png" alt="NHF Logo" class="header-icon" />
-    <h1>NHF Aura Manager</h1>
+  <div class="title-bar">
+    <div class="title-bar-drag" data-tauri-drag-region>
+      <img src="/icon.png" alt="" class="title-bar-icon" width="18" height="18" />
+      <span class="title-bar-text">NHF Addon Manager</span>
+    </div>
+    <div class="title-bar-controls">
+      <button
+        type="button"
+        class="title-bar-btn"
+        aria-label="Minimize"
+        onclick={titleBarMinimize}
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"
+          ><path
+            fill="currentColor"
+            d="M0 5h10v1H0z"
+          /></svg
+        >
+      </button>
+      <button
+        type="button"
+        class="title-bar-btn title-bar-btn-close"
+        aria-label="Close"
+        onclick={titleBarClose}
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"
+          ><path
+            d="M1 1 9 9M9 1 1 9"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+          /></svg
+        >
+      </button>
+    </div>
   </div>
+
   <div class="main-content">
     <div class="left-panel">
-      <div class="input">
-        <label for="wow_folder"
-          >WoW Folder (i.e. .../World of Warcraft/_retail_)</label
-        >
-        <input
-          onclick={openFolder}
-          name="folder"
-          id="wow_folder"
-          bind:value={wowFolder}
-        />
-      </div>
-      <div class="input">
-        <label for="api_key">API Key (Get From Discord)</label>
-        <input
-          name="api_key"
-          id="api_key"
-          bind:value={apiKey}
-          onchange={updateKey}
-        />
-      </div>
+      <section class="panel-section">
+        <h2 class="panel-section-title">Setup</h2>
+        <div class="input">
+          <label for="wow_folder">WoW folder</label>
+          <div class="folder-picker-row">
+            <input
+              type="text"
+              name="folder"
+              id="wow_folder"
+              bind:value={wowFolder}
+              placeholder="…\World of Warcraft\_retail_"
+              autocomplete="off"
+              onclick={openFolder}
+              onblur={onWowFolderBlur}
+            />
+            <button
+              type="button"
+              class="browse-folder-btn"
+              onclick={openFolder}
+              title="Open File Explorer to select WoW folder"
+              aria-label="Browse for WoW folder"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path
+                  d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="input">
+          <label for="api_key">API key (from Discord)</label>
+          <input
+            name="api_key"
+            id="api_key"
+            bind:value={apiKey}
+            onchange={updateKey}
+          />
+        </div>
+      </section>
 
-      <div class="checkbox-group" style="margin-top: 12px;">
-        <input
-          type="checkbox"
-          id="minimize_to_tray"
-          bind:checked={minimizeToTray}
-          onchange={updateMinimizeToTray}
-        />
-        <label for="minimize_to_tray">Hide to Tray Instead of Close</label>
-      </div>
+      <section class="panel-section">
+        <h2 class="panel-section-title">App behavior</h2>
+        <div class="checkbox-list">
+          <div class="checkbox-group">
+            <input
+              type="checkbox"
+              id="minimize_to_tray"
+              bind:checked={minimizeToTray}
+              onchange={updateMinimizeToTray}
+            />
+            <label for="minimize_to_tray">Hide to tray instead of close</label>
+          </div>
 
-      <div class="checkbox-group" style="margin-top: 8px;">
-        <input
-          type="checkbox"
-          id="auto_update"
-          bind:checked={autoUpdate}
-          onchange={updateAutoUpdateSetting}
-        />
-        <label for="auto_update">Auto Update Addons</label>
-      </div>
+          <div class="checkbox-group">
+            <input
+              type="checkbox"
+              id="auto_update"
+              bind:checked={autoUpdate}
+              onchange={updateAutoUpdateSetting}
+            />
+            <label for="auto_update">Auto-update addons</label>
+          </div>
 
-      <div class="checkbox-group" style="margin-top: 8px;">
-        <input
-          type="checkbox"
-          id="start_on_startup"
-          bind:checked={startOnStartup}
-          onchange={updateStartOnStartupSetting}
-        />
-        <label for="start_on_startup">Start on PC Startup</label>
-      </div>
+          <div class="checkbox-group">
+            <input
+              type="checkbox"
+              id="start_on_startup"
+              bind:checked={startOnStartup}
+              onchange={updateStartOnStartupSetting}
+            />
+            <label for="start_on_startup">Start when Windows starts</label>
+          </div>
+        </div>
+      </section>
 
       <div class="backup-section">
-        <h3>Backup WeakAuras</h3>
+        <h2 class="panel-section-title">WeakAuras backup</h2>
         <div class="checkbox-group">
           <input
             type="checkbox"
@@ -1154,23 +1407,12 @@
           >
             {isBackingUp ? "Backing Up..." : "Backup Now"}
           </button>
-
-          {#if isBackingUp || backupStatus}
-            <div class="progress-container">
-              <div class="progress-bar">
-                <div
-                  class="progress-fill"
-                  style="width: {backupProgress}%"
-                ></div>
-              </div>
-              <div class="progress-text">{backupStatus}</div>
-            </div>
-          {/if}
         {/if}
       </div>
     </div>
 
     <div class="right-panel">
+      <h2 class="panel-section-title actions-heading">Addons</h2>
       <div class="action-buttons">
         <button
           type="button"
@@ -1178,11 +1420,37 @@
           onclick={manualRefresh}
           disabled={!wowFolder || !apiKey}
         >
-          Refresh
+          Refresh status
         </button>
 
         <div class="button-group">
-          <label for="nhf-addon-btn">NHF Addon</label>
+          <div class="button-group-label-col">
+            <label for="nhf-addon-btn">NHF Addon</label>
+            {#if !wowFolder || !apiKey}
+              <div
+                class="row-status row-status-idle"
+                title="Set WoW folder and API key to load version"
+              >
+                <div class="dot gray"></div>
+                <span class="row-status-version">—</span>
+              </div>
+            {:else}
+              {#await data.addon}
+                <div class="row-status row-status-loading">
+                  {@render rowAwaitSpinner()}
+                </div>
+              {:then addon}
+                <div class="row-status" title="Installed version">
+                  <div
+                    class="dot"
+                    class:gray={!addon.isActive}
+                    class:green={addon.isCurrent}
+                  ></div>
+                  <span class="row-status-version">{addon.currentVersion}</span>
+                </div>
+              {/await}
+            {/if}
+          </div>
           <button
             id="nhf-addon-btn"
             type="button"
@@ -1194,7 +1462,33 @@
         </div>
 
         <div class="button-group">
-          <label for="ns-raid-tools-btn">NS Raid Tools</label>
+          <div class="button-group-label-col">
+            <label for="ns-raid-tools-btn">NS Raid Tools</label>
+            {#if !wowFolder || !apiKey}
+              <div
+                class="row-status row-status-idle"
+                title="Set WoW folder and API key to load version"
+              >
+                <div class="dot gray"></div>
+                <span class="row-status-version">—</span>
+              </div>
+            {:else}
+              {#await data.nsRaidTools}
+                <div class="row-status row-status-loading">
+                  {@render rowAwaitSpinner()}
+                </div>
+              {:then addon}
+                <div class="row-status" title="Installed version">
+                  <div
+                    class="dot"
+                    class:gray={!addon.isActive}
+                    class:green={addon.isCurrent}
+                  ></div>
+                  <span class="row-status-version">{addon.currentVersion}</span>
+                </div>
+              {/await}
+            {/if}
+          </div>
           <button
             id="ns-raid-tools-btn"
             type="button"
@@ -1206,7 +1500,33 @@
         </div>
 
         <div class="button-group">
-          <label for="m33k-auras-btn">M33kAuras</label>
+          <div class="button-group-label-col">
+            <label for="m33k-auras-btn">M33kAuras</label>
+            {#if !wowFolder || !apiKey}
+              <div
+                class="row-status row-status-idle"
+                title="Set WoW folder and API key to load version"
+              >
+                <div class="dot gray"></div>
+                <span class="row-status-version">—</span>
+              </div>
+            {:else}
+              {#await data.m33kAuras}
+                <div class="row-status row-status-loading">
+                  {@render rowAwaitSpinner()}
+                </div>
+              {:then addon}
+                <div class="row-status" title="Installed version">
+                  <div
+                    class="dot"
+                    class:gray={!addon.isActive}
+                    class:green={addon.isCurrent}
+                  ></div>
+                  <span class="row-status-version">{addon.currentVersion}</span>
+                </div>
+              {/await}
+            {/if}
+          </div>
           <button
             id="m33k-auras-btn"
             type="button"
@@ -1218,7 +1538,33 @@
         </div>
 
         <div class="button-group">
-          <label for="liquid-reminders-btn">Liquid Reminders</label>
+          <div class="button-group-label-col">
+            <label for="liquid-reminders-btn">Liquid Reminders</label>
+            {#if !wowFolder || !apiKey}
+              <div
+                class="row-status row-status-idle"
+                title="Set WoW folder and API key to load version"
+              >
+                <div class="dot gray"></div>
+                <span class="row-status-version">—</span>
+              </div>
+            {:else}
+              {#await data.liquidReminders}
+                <div class="row-status row-status-loading">
+                  {@render rowAwaitSpinner()}
+                </div>
+              {:then addon}
+                <div class="row-status" title="Installed version">
+                  <div
+                    class="dot"
+                    class:gray={!addon.isActive}
+                    class:green={addon.isCurrent}
+                  ></div>
+                  <span class="row-status-version">{addon.currentVersion}</span>
+                </div>
+              {/await}
+            {/if}
+          </div>
           <button
             id="liquid-reminders-btn"
             type="button"
@@ -1230,39 +1576,43 @@
         </div>
 
         <div class="button-group">
-          <label for="client-update-btn">Client Update</label>
           {#await data.client}
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              ><path
-                fill="currentColor"
-                d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
-                ><animateTransform
-                  attributeName="transform"
-                  dur="0.75s"
-                  repeatCount="indefinite"
-                  type="rotate"
-                  values="0 12 12;360 12 12"
-                /></path
-              ></svg
-            >
+            <div class="button-group-label-col">
+              <label for="client-update-btn">Client Update</label>
+              <div class="row-status row-status-loading">
+                {@render rowAwaitSpinner()}
+              </div>
+            </div>
+            <div class="client-button-wrap">
+              {@render rowAwaitSpinner()}
+            </div>
           {:then client}
-            {#if !client.isCurrent}
-              <button
-                id="client-update-btn"
-                class="clientupdate glowing"
-                onclick={updateClient}>Update</button
-              >
-            {:else}
-              <button
-                id="client-update-btn"
-                class="clientupdate noanim"
-                disabled>Up To Date</button
-              >
-            {/if}
+            <div class="button-group-label-col">
+              <label for="client-update-btn">Client Update</label>
+              <div class="row-status" title="Running version">
+                <div
+                  class="dot"
+                  class:gray={!client.isActive}
+                  class:green={client.isCurrent}
+                ></div>
+                <span class="row-status-version">{client.currentVersion}</span>
+              </div>
+            </div>
+            <div class="client-button-wrap">
+              {#if !client.isCurrent}
+                <button
+                  id="client-update-btn"
+                  class="clientupdate glowing"
+                  onclick={updateClient}>Update</button
+                >
+              {:else}
+                <button
+                  id="client-update-btn"
+                  class="clientupdate noanim"
+                  disabled>Up To Date</button
+                >
+              {/if}
+            </div>
           {/await}
         </div>
 
@@ -1282,213 +1632,124 @@
     </div>
   </div>
 
-  <div class="status-panel">
-    {#if !apiKey || !wowFolder}
-      <div class="indicator">
-        <div class="dot gray"></div>
-        <div>
-          <span>Set folder and API key to see addon status.</span>
-        </div>
+  <div
+    class="install-dock-panel"
+    class:install-dock-open={installDock.open}
+    aria-hidden={!installDock.open}
+  >
+    <div
+      class="install-dock-inner"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <div class="install-dock-top">
+        <span class="install-dock-name">{installDock.name}</span>
+        <span class="install-dock-phase">
+          {#if installDock.phase === "download"}
+            Downloading
+          {:else if installDock.phase === "extract"}
+            Extracting
+          {:else}
+            Backing up
+          {/if}
+        </span>
       </div>
-    {:else}
-      {#await data.addon}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          ><path
-            fill="currentColor"
-            d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
-            ><animateTransform
-              attributeName="transform"
-              dur="0.75s"
-              repeatCount="indefinite"
-              type="rotate"
-              values="0 12 12;360 12 12"
-            /></path
-          ></svg
-        >
-      {:then addon}
-        <div class="indicator">
+      <div class="install-dock-bar">
+        {#if installDock.phase === "extract"}
+          <div class="install-dock-fill install-dock-fill-busy"></div>
+        {:else}
           <div
-            class="dot"
-            class:gray={!addon.isActive}
-            class:green={addon.isCurrent}
+            class="install-dock-fill"
+            style="width: {installDock.percent}%"
           ></div>
-          <div>
-            <span>Addon</span>
-            <span>Version: {addon.currentVersion}</span>
-          </div>
-        </div>
-      {/await}
-      {#await data.nsRaidTools}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          ><path
-            fill="currentColor"
-            d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
-            ><animateTransform
-              attributeName="transform"
-              dur="0.75s"
-              repeatCount="indefinite"
-              type="rotate"
-              values="0 12 12;360 12 12"
-            /></path
-          ></svg
-        >
-      {:then addon}
-        <div class="indicator">
-          <div
-            class="dot"
-            class:gray={!addon.isActive}
-            class:green={addon.isCurrent}
-          ></div>
-          <div>
-            <span>NS Raid Tools</span>
-            <span>Version: {addon.currentVersion}</span>
-          </div>
-        </div>
-      {/await}
-      {#await data.m33kAuras}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          ><path
-            fill="currentColor"
-            d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
-            ><animateTransform
-              attributeName="transform"
-              dur="0.75s"
-              repeatCount="indefinite"
-              type="rotate"
-              values="0 12 12;360 12 12"
-            /></path
-          ></svg
-        >
-      {:then addon}
-        <div class="indicator">
-          <div
-            class="dot"
-            class:gray={!addon.isActive}
-            class:green={addon.isCurrent}
-          ></div>
-          <div>
-            <span>M33kAuras</span>
-            <span>Version: {addon.currentVersion}</span>
-          </div>
-        </div>
-      {/await}
-      {#await data.liquidReminders}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          ><path
-            fill="currentColor"
-            d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
-            ><animateTransform
-              attributeName="transform"
-              dur="0.75s"
-              repeatCount="indefinite"
-              type="rotate"
-              values="0 12 12;360 12 12"
-            /></path
-          ></svg
-        >
-      {:then addon}
-        <div class="indicator">
-          <div
-            class="dot"
-            class:gray={!addon.isActive}
-            class:green={addon.isCurrent}
-          ></div>
-          <div>
-            <span>Liquid Reminders</span>
-            <span>Version: {addon.currentVersion}</span>
-          </div>
-        </div>
-      {/await}
-    {/if}
-    {#await data.client}
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        ><path
-          fill="currentColor"
-          d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
-          ><animateTransform
-            attributeName="transform"
-            dur="0.75s"
-            repeatCount="indefinite"
-            type="rotate"
-            values="0 12 12;360 12 12"
-          /></path
-        ></svg
-      >
-    {:then client}
-      <div class="indicator">
-        <div
-          class="dot"
-          class:gray={!client.isActive}
-          class:green={client.isCurrent}
-        ></div>
-        <div>
-          <span>Client</span>
-          <span>Version: {client.currentVersion}</span>
-        </div>
+        {/if}
       </div>
-    {/await}
-    {#await data.isServerUp}
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        ><path
-          fill="currentColor"
-          d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z"
-          ><animateTransform
-            attributeName="transform"
-            dur="0.75s"
-            repeatCount="indefinite"
-            type="rotate"
-            values="0 12 12;360 12 12"
-          /></path
-        ></svg
-      >
-    {:then isServerUp}
-      <div class="indicator">
-        <div class="dot" class:green={isServerUp}></div>
-        <span>Server</span>
-      </div>
-    {/await}
+      <p class="install-dock-detail">{installDock.detail}</p>
+    </div>
   </div>
+
+  <footer class="server-footer">
+    {#await data.isServerUp}
+      <div class="server-footer-inner">
+        {@render rowAwaitSpinner()}
+      </div>
+    {:then isServerUp}
+      <div class="server-footer-inner">
+        <div class="dot server-dot" class:green={isServerUp}></div>
+        <span class="server-footer-label">Server</span>
+        <span class="server-footer-state" class:online={isServerUp}>
+          {isServerUp ? "Online" : "Offline"}
+        </span>
+      </div>
+    {/await}
+  </footer>
 </main>
 
 <style>
-  @import url("https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap");
+  @import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap");
+
+  :global(html) {
+    height: 100%;
+    background: transparent;
+  }
+
+  :global(body) {
+    margin: 0;
+    height: 100%;
+    min-height: 100%;
+    overflow: hidden;
+    color-scheme: dark;
+    background: transparent;
+  }
+
   main {
-    color: #ebebd3;
-    font-family: "Poppins", sans-serif;
-    font-optical-sizing: auto;
+    --app-bg: #0c0e14;
+    --surface-0: rgba(22, 26, 36, 0.92);
+    --surface-1: rgba(30, 35, 48, 0.95);
+    --surface-2: rgba(38, 44, 60, 0.98);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --text: #e8eaef;
+    --text-muted: #9aa3b5;
+    --text-subtle: #6b7289;
+    --accent: #5b8def;
+    --accent-soft: rgba(91, 141, 239, 0.18);
+    --accent-ring: rgba(91, 141, 239, 0.45);
+    --success: #34c759;
+    --success-muted: rgba(52, 199, 89, 0.16);
+    --danger: #ff5c5c;
+    --danger-muted: rgba(255, 92, 92, 0.14);
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.45);
+    --font: "DM Sans", system-ui, -apple-system, sans-serif;
+
+    color: var(--text);
+    font-family: var(--font);
     font-weight: 400;
-    font-style: normal;
-    height: 96vh;
+    height: 100%;
+    min-height: 100%;
+    max-height: 100%;
     display: flex;
     flex-direction: column;
-    padding: 8px 20px;
+    padding: 16px 24px 12px;
     box-sizing: border-box;
     position: relative;
     overflow: hidden;
+    border-radius: var(--radius-lg);
+    /* Dark edge hides WebView alpha fringe; avoid light outer rings (read as white corners). */
+    border: 1px solid rgba(0, 0, 0, 0.55);
+    background: radial-gradient(
+        ellipse 120% 80% at 50% -20%,
+        rgba(91, 141, 239, 0.12),
+        transparent 55%
+      ),
+      linear-gradient(165deg, #0c0e14 0%, #12151f 45%, #0a0c12 100%);
+    /* No outer blur: OS + WebView2 often composite it as a square on transparent windows. */
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   }
 
   .notification {
@@ -1497,62 +1758,72 @@
     left: 50%;
     transform: translateX(-50%);
     z-index: 1000;
-    padding: 12px 20px;
-    border-radius: 8px;
+    padding: 14px 18px;
+    border-radius: var(--radius-md);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     min-width: 300px;
     max-width: 500px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    animation: slideInFromTop 0.3s ease-out;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: var(--shadow-md);
+    animation: slideInFromTop 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    border: 1px solid var(--border-strong);
   }
 
   .notification.error {
-    background: #dc3545;
-    color: white;
-    border: 1px solid #c82333;
+    background: linear-gradient(
+      135deg,
+      rgba(180, 48, 58, 0.95),
+      rgba(130, 32, 42, 0.92)
+    );
+    color: #fff;
   }
 
   .notification.success {
-    background: #28a745;
-    color: white;
-    border: 1px solid #1e7e34;
+    background: linear-gradient(
+      135deg,
+      rgba(36, 120, 72, 0.95),
+      rgba(24, 90, 52, 0.92)
+    );
+    color: #fff;
   }
 
   .notification-message {
     flex: 1;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
+    line-height: 1.45;
   }
 
   .notification-close {
-    background: none;
+    background: rgba(255, 255, 255, 0.12);
     border: none;
     color: white;
-    font-size: 14px;
-    font-weight: bold;
+    font-size: 18px;
+    line-height: 1;
+    font-weight: 500;
     cursor: pointer;
-    padding: 0;
-    width: 16px;
-    height: 16px;
+    padding: 6px;
+    width: 28px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 50%;
+    border-radius: var(--radius-sm);
     transition: background-color 0.2s ease;
-    flex: 0;
-    padding: 16px;
-    margin-left: 4px;
+    flex: 0 0 auto;
+    margin-left: 2px;
   }
 
   .notification-close:hover {
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.22);
   }
 
   @keyframes slideInFromTop {
     from {
-      transform: translateX(-50%) translateY(-100%);
+      transform: translateX(-50%) translateY(-120%);
       opacity: 0;
     }
     to {
@@ -1561,417 +1832,829 @@
     }
   }
 
-  .header {
+  .title-bar {
+    position: relative;
+    z-index: 1;
+    flex-shrink: 0;
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    min-height: 38px;
+    margin: -16px -24px 18px -24px;
+    background: rgba(12, 14, 20, 0.97);
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+  }
+
+  .title-bar-drag {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 5px;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+    padding: 0 14px;
+    cursor: default;
   }
 
-  .header-icon {
-    width: 32px;
-    height: 32px;
+  .title-bar-icon {
+    flex-shrink: 0;
+    border-radius: 5px;
+    object-fit: contain;
+    box-shadow: 0 0 0 1px var(--border);
   }
 
-  h1 {
-    margin: 0;
-    color: #fefefe;
-    text-align: left;
-    font-size: 20px;
+  .title-bar-text {
+    font-size: 13px;
     font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .title-bar-controls {
+    display: flex;
+    flex-shrink: 0;
+  }
+
+  .title-bar-btn {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    min-width: 46px;
+    min-height: 38px;
+    padding: 0 !important;
+    margin: 0 !important;
+    flex: 0 0 auto !important;
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-family: var(--font);
+    transition:
+      background 0.12s ease,
+      color 0.12s ease;
+  }
+
+  .title-bar-btn:hover {
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: var(--text);
+    filter: none !important;
+  }
+
+  .title-bar-btn-close:hover {
+    background: #c42b1c !important;
+    color: #fff !important;
+  }
+
+  .title-bar-btn:active {
+    background: rgba(255, 255, 255, 0.12) !important;
+  }
+
+  .title-bar-btn-close:active:hover {
+    background: #a92418 !important;
+    color: #fff !important;
   }
 
   .main-content {
-    display: flex;
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) minmax(300px, 1.12fr);
     gap: 20px;
-    margin: 8px 0 0 0;
+    margin: 0;
     flex: 1;
     min-height: 0;
+    align-items: stretch;
+  }
+
+  @media (max-width: 640px) {
+    .main-content {
+      grid-template-columns: 1fr;
+    }
   }
 
   .left-panel,
   .right-panel {
-    flex: 1;
-    background: #2a2a2a;
-    border-radius: 12px;
-    padding: 20px;
-    border: 1px solid #3a3a3a;
+    display: flex;
+    flex-direction: column;
+    background: rgba(28, 32, 44, 0.45);
+    backdrop-filter: blur(20px) saturate(1.4);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    border-radius: var(--radius-lg);
+    padding: 20px 22px 22px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
     min-height: 0;
-    overflow: hidden;
+    overflow: auto;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+      0 8px 32px rgba(0, 0, 0, 0.28);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(91, 141, 239, 0.45) rgba(255, 255, 255, 0.06);
+  }
+
+  .left-panel::-webkit-scrollbar,
+  .right-panel::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .left-panel::-webkit-scrollbar-button,
+  .right-panel::-webkit-scrollbar-button {
+    display: block;
+    width: 0 !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    min-width: 0 !important;
+  }
+
+  .left-panel::-webkit-scrollbar-button:vertical:decrement,
+  .right-panel::-webkit-scrollbar-button:vertical:decrement,
+  .left-panel::-webkit-scrollbar-button:vertical:increment,
+  .right-panel::-webkit-scrollbar-button:vertical:increment,
+  .left-panel::-webkit-scrollbar-button:horizontal:decrement,
+  .right-panel::-webkit-scrollbar-button:horizontal:decrement,
+  .left-panel::-webkit-scrollbar-button:horizontal:increment,
+  .right-panel::-webkit-scrollbar-button:horizontal:increment {
+    display: block;
+    width: 0 !important;
+    height: 0 !important;
+  }
+
+  .left-panel::-webkit-scrollbar-track,
+  .right-panel::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 6px;
+    margin: 4px 0;
+  }
+
+  .left-panel::-webkit-scrollbar-thumb,
+  .right-panel::-webkit-scrollbar-thumb {
+    background: rgba(91, 141, 239, 0.38);
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .left-panel::-webkit-scrollbar-thumb:hover,
+  .right-panel::-webkit-scrollbar-thumb:hover {
+    background: rgba(91, 141, 239, 0.58);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .left-panel::-webkit-scrollbar-corner,
+  .right-panel::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  .panel-section {
+    margin-bottom: 20px;
+  }
+
+  .panel-section:last-of-type {
+    margin-bottom: 0;
+  }
+
+  .panel-section-title {
+    margin: 0 0 12px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .actions-heading {
+    margin: 0 0 14px;
+    flex-shrink: 0;
+  }
+
+  .checkbox-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .action-buttons {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
   }
 
   .button-group {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(128px, 34%) minmax(0, 1fr);
     align-items: center;
-    gap: 12px;
+    gap: 10px 14px;
   }
 
-  .button-group label {
+  .button-group-label-col {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .button-group-label-col label {
     font-size: 12px;
     font-weight: 600;
-    color: #ccc;
-    min-width: 120px;
+    color: var(--text);
     text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    line-height: 1.25;
+    margin: 0;
+  }
+
+  .client-button-wrap {
+    min-width: 0;
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+  }
+
+  .client-button-wrap button {
+    width: 100%;
+  }
+
+  .row-status {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 7px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .row-status-version {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    line-height: 1.2;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+  }
+
+  .row-status-idle .row-status-version {
+    color: var(--text-subtle);
+    font-weight: 500;
+  }
+
+  .row-status-loading {
+    justify-content: flex-start;
+    min-height: 18px;
+  }
+
+  .row-status-spinner {
+    color: var(--accent);
+    opacity: 0.88;
+    flex-shrink: 0;
   }
 
   .input {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    margin: 4px 0 0;
+    gap: 6px;
+    margin: 0 0 12px;
+  }
+
+  .input:last-child {
+    margin-bottom: 0;
   }
 
   .input input {
-    padding: 4px 8px;
-    font-weight: 600;
+    padding: 10px 14px;
+    font-weight: 500;
+    font-size: 13px;
   }
 
-  .status-panel {
+  .folder-picker-row {
     display: flex;
-    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .folder-picker-row input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .browse-folder-btn {
+    flex: 0 0 auto !important;
+    display: inline-flex;
+    align-items: center;
     justify-content: center;
-    background: #1a1a1a;
-    border-radius: 8px;
-    padding: 8px 12px;
-    gap: 12px;
-    border: 1px solid #3a3a3a;
-    margin-top: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    white-space: nowrap;
+    transition:
+      background 0.2s ease,
+      border-color 0.2s ease,
+      color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .browse-folder-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--accent-ring);
+    color: var(--accent);
+  }
+
+  .browse-folder-btn:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .install-dock-panel {
+    position: relative;
+    z-index: 1;
     flex-shrink: 0;
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
+    transform: translateY(12px);
+    transition:
+      max-height 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 0.28s ease,
+      transform 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+      margin 0.42s ease;
+    margin-top: 0;
+    pointer-events: none;
+  }
+
+  .install-dock-panel.install-dock-open {
+    max-height: 120px;
+    opacity: 1;
+    transform: translateY(0);
+    margin-top: 10px;
+    pointer-events: auto;
+  }
+
+  .install-dock-inner {
+    padding: 12px 14px 14px;
+    border-radius: var(--radius-md);
+    background: var(--surface-1);
+    border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-md);
+  }
+
+  .install-dock-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .install-dock-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .install-dock-phase {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+  }
+
+  .install-dock-bar {
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+
+  .install-dock-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), #8ab4ff);
+    transition: width 0.22s ease-out;
+    min-width: 0;
+  }
+
+  .install-dock-fill-busy {
+    width: 38%;
+    animation: installDockIndeterminate 1.1s ease-in-out infinite;
+  }
+
+  @keyframes installDockIndeterminate {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(280%);
+    }
+  }
+
+  .install-dock-detail {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+
+  .server-footer {
+    position: relative;
+    z-index: 1;
+    margin-top: auto;
+    padding-top: 10px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+  }
+
+  .server-footer-inner {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-subtle);
+  }
+
+  .server-footer-label {
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+  }
+
+  .server-footer-state {
+    font-weight: 600;
+    color: #c93c4f;
+  }
+
+  .server-footer-state.online {
+    color: var(--success);
+  }
+
+  .server-dot {
+    width: 7px;
+    height: 7px;
   }
 
   .dot {
-    width: 8px;
-    height: 8px;
-    background: #b5001b;
-    border-radius: 100%;
+    width: 9px;
+    height: 9px;
+    flex-shrink: 0;
+    background: #c93c4f;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px rgba(201, 60, 79, 0.25);
   }
 
   .dot.green {
-    background: #008c15;
+    background: var(--success);
+    box-shadow: 0 0 0 2px var(--success-muted);
   }
 
   .dot.gray {
-    background: #4d4d4d;
-  }
-
-  .indicator {
-    font-size: 11px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 6px;
+    background: #5c6270;
+    box-shadow: 0 0 0 2px rgba(92, 98, 112, 0.2);
   }
 
   input {
-    border-radius: 8px;
-    border: 1px solid #3a3a3a;
-    background: #1a1a1a;
-    color: #fefefe;
-    padding: 10px 12px;
-    transition: border-color 0.2s ease;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    background: var(--surface-0);
+    color: var(--text);
+    padding: 10px 14px;
+    font-size: 13px;
+    transition:
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  input:hover:not(:focus) {
+    border-color: rgba(255, 255, 255, 0.16);
   }
 
   input:focus {
     outline: none;
-    border-color: #5899e2;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
 
   .input label {
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.03em;
   }
 
   .backup-section {
-    margin-top: 20px;
+    margin-top: 4px;
     padding-top: 20px;
-    border-top: 1px solid #3a3a3a;
-  }
-
-  .backup-section h3 {
-    margin: 0 0 16px 0;
-    color: #fefefe;
-    font-size: 16px;
-    font-weight: 600;
+    border-top: 1px solid var(--border);
   }
 
   .checkbox-group {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 12px;
+    gap: 10px;
+    margin-bottom: 0;
+    min-height: 28px;
   }
 
   .checkbox-group input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: #5899e2;
+    width: 17px;
+    height: 17px;
+    border-radius: 4px;
+    accent-color: var(--accent);
+    cursor: pointer;
   }
 
   .checkbox-group label {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
-    color: #ccc;
+    color: var(--text-muted);
     cursor: pointer;
   }
 
   .auto-update-info {
-    margin-top: 8px;
-    margin-bottom: 12px;
-    padding: 8px 12px;
-    background: rgba(88, 153, 226, 0.1);
-    border: 1px solid rgba(88, 153, 226, 0.3);
-    border-radius: 6px;
-  }
-
-  .auto-update-info small {
-    color: #5899e2;
-    font-size: 11px;
-    font-weight: 500;
-    display: block;
-    margin-bottom: 4px;
+    margin-top: 4px;
+    margin-bottom: 8px;
+    padding: 12px 14px;
+    background: var(--accent-soft);
+    border: 1px solid rgba(91, 141, 239, 0.28);
+    border-radius: var(--radius-sm);
   }
 
   .update-status,
   .update-queue {
-    font-size: 11px;
-    color: #5899e2;
+    font-size: 12px;
+    color: var(--accent);
     font-weight: 600;
     margin-top: 4px;
   }
 
   .refresh-button-full {
     width: 100%;
-    margin: 12px 0;
-    background: #2d3748;
-    color: #e2e8f0;
-    border: 1px solid #4a5568;
-    border-radius: 5px;
-    padding: 8px 16px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
+    margin: 0 0 6px;
+    flex: 0 0 auto;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+    font-weight: 600;
     font-size: 12px;
+    font-family: var(--font);
+    cursor: pointer;
+    transition:
+      background 0.2s ease,
+      border-color 0.2s ease,
+      transform 0.15s ease;
   }
 
   .refresh-button-full:hover:not(:disabled) {
-    background: #4a5568;
-    border-color: #718096;
-    color: white;
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+
+  .refresh-button-full:active:not(:disabled) {
+    transform: scale(0.99);
   }
 
   .refresh-button-full:disabled {
-    background: #444;
-    color: #bbb;
-    border-color: #666;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-subtle);
+    border-color: var(--border);
     cursor: not-allowed;
+    opacity: 0.75;
   }
 
   .backup-button {
     width: 100%;
-    margin-top: 8px;
-    background: #28a745;
-    color: white;
-    border: none;
-    border-radius: 5px;
-    padding: 8px 16px;
+    margin-top: 10px;
+    background: linear-gradient(135deg, #2d9f5e 0%, #248a52 100%);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
     font-weight: 600;
+    font-size: 13px;
+    font-family: var(--font);
     cursor: pointer;
-    transition: background-color 0.2s ease;
+    transition:
+      filter 0.2s ease,
+      transform 0.15s ease;
+    box-shadow: 0 2px 8px rgba(36, 138, 82, 0.25);
   }
 
   .backup-button:hover:not(:disabled) {
-    background: #218838;
+    filter: brightness(1.06);
+  }
+
+  .backup-button:active:not(:disabled) {
+    transform: scale(0.995);
   }
 
   .backup-button:disabled {
-    background: #444;
-    color: #bbb;
+    background: var(--surface-2);
+    color: var(--text-subtle);
+    border-color: var(--border);
+    box-shadow: none;
     cursor: not-allowed;
-  }
-
-  .progress-container {
-    margin-top: 12px;
-  }
-
-  .progress-bar {
-    width: 100%;
-    height: 8px;
-    background: #333;
-    border-radius: 4px;
-    overflow: hidden;
-    margin-bottom: 4px;
-  }
-
-  .progress-fill {
-    height: 100%;
-    background: #5899e2;
-    transition: width 0.3s ease;
-  }
-
-  .progress-text {
-    font-size: 11px;
-    color: #ccc;
-    text-align: center;
+    filter: none;
   }
 
   .last-backup-info {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin: 8px 0;
-    padding: 8px 12px;
-    background: #1a1a1a;
-    border-radius: 6px;
-    border: 1px solid #3a3a3a;
+    margin: 10px 0;
+    padding: 10px 14px;
+    background: var(--surface-0);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    gap: 10px;
   }
 
   .last-backup-text {
     display: flex;
-    gap: 2px;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    align-items: baseline;
+    min-width: 0;
   }
 
   .last-backup-label {
     font-size: 11px;
-    color: #999;
+    color: var(--text-subtle);
     font-weight: 500;
   }
 
   .last-backup-time {
     font-size: 11px;
-    color: #5899e2;
+    color: var(--accent);
     font-weight: 600;
   }
 
   .folder-button {
-    background: #3a3a3a;
-    border: 1px solid #4a4a4a;
-    border-radius: 4px;
-    color: #ccc;
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
     cursor: pointer;
-    font-size: 10px;
-    padding: 2px 4px;
-    transition: all 0.2s ease;
-    height: 22px;
-    display: flex;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font);
+    padding: 6px 10px;
+    transition:
+      background 0.2s ease,
+      border-color 0.2s ease,
+      color 0.2s ease;
+    min-height: 30px;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 2px;
-    flex: 0;
+    gap: 4px;
+    flex: 0 0 auto;
     white-space: nowrap;
   }
 
   .folder-button:hover {
-    background: #4a4a4a;
-    border-color: #5899e2;
-    color: #5899e2;
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--accent-ring);
+    color: var(--accent);
   }
 
+  /* Base: all buttons */
   button {
-    font-family: "Poppins", sans-serif;
-    font-optical-sizing: auto;
-    font-weight: 400;
-    font-style: normal;
-    background: #5899e2;
-    color: #fefefe;
-    position: relative;
-    padding: 8px 16px;
-    font-weight: 600;
+    font-family: var(--font);
     margin: 0;
-    border: transparent;
-    border-radius: 5px;
+    border: none;
     cursor: pointer;
     flex: 1;
   }
 
-  button.glowing,
-  button:not(.noanim):disabled {
-    background: #fefefe;
-    color: #1e1e1e;
+  /* Primary addon + client actions */
+  .action-buttons .button-group > button,
+  .action-buttons button.clientupdate {
+    position: relative;
+    padding: 10px 18px;
+    font-weight: 600;
+    font-size: 13px;
+    border-radius: var(--radius-sm);
+    color: #f4f7ff;
+    background: linear-gradient(180deg, #6a9af0 0%, #4a7fd4 52%, #3d6fc4 100%);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.12) inset,
+      0 4px 14px rgba(61, 111, 196, 0.35);
+    transition:
+      transform 0.15s ease,
+      box-shadow 0.2s ease,
+      filter 0.2s ease;
   }
 
-  button:before {
-    content: "";
-    background: linear-gradient(
-      45deg,
-      #ff0000,
-      #ff7300,
-      #fffb00,
-      #48ff00,
-      #00ffd5,
-      #002bff,
-      #7a00ff,
-      #ff00c8,
-      #ff0000
-    );
-    position: absolute;
-    top: -2px;
-    left: -2px;
-    background-size: 400%;
-    z-index: -1;
-    filter: blur(5px);
-    width: calc(100% + 4px);
-    height: calc(100% + 4px);
-    animation: glowing 20s linear infinite;
-    opacity: 0;
-    transition: opacity 0.3s ease-in-out;
-    border-radius: 10px;
+  .action-buttons .button-group > button:hover:not(:disabled),
+  .action-buttons button.clientupdate:hover:not(:disabled) {
+    filter: brightness(1.05);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.16) inset,
+      0 6px 20px rgba(61, 111, 196, 0.45);
   }
 
-  button:after {
-    z-index: -1;
-    content: "";
-    position: absolute;
-    width: 100%;
-    height: 100%;
-    background: #111;
-    left: 0;
-    top: 0;
-    border-radius: 10px;
+  .action-buttons .button-group > button:active:not(:disabled),
+  .action-buttons button.clientupdate:active:not(:disabled) {
+    transform: scale(0.99);
   }
 
-  @keyframes glowing {
-    0% {
-      background-position: 0 0;
+  /* Update available — attention without rainbow */
+  .action-buttons .button-group > button.glowing:not(:disabled),
+  .action-buttons button.clientupdate.glowing:not(:disabled) {
+    color: #0d1118;
+    background: linear-gradient(180deg, #fff 0%, #e8eef9 100%);
+    border-color: rgba(91, 141, 239, 0.55);
+    box-shadow:
+      0 0 0 1px rgba(91, 141, 239, 0.35),
+      0 0 28px rgba(91, 141, 239, 0.4);
+    animation: accentPulse 2.2s ease-in-out infinite;
+  }
+
+  @keyframes accentPulse {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 1px rgba(91, 141, 239, 0.35),
+        0 0 22px rgba(91, 141, 239, 0.32);
     }
     50% {
-      background-position: 400% 0;
-    }
-    100% {
-      background-position: 0 0;
+      box-shadow:
+        0 0 0 1px rgba(91, 141, 239, 0.55),
+        0 0 36px rgba(91, 141, 239, 0.5);
     }
   }
 
-  button.glowing:before,
-  button:not(.noanim):disabled:before {
-    opacity: 1;
+  /* Busy / downloading */
+  .action-buttons .button-group > button:disabled:not(.disabled-btn),
+  .action-buttons button.clientupdate:disabled:not(.noanim):not(.disabled-btn) {
+    color: var(--text-muted);
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    box-shadow: none;
+    animation: none;
+    cursor: wait;
+    filter: none;
   }
 
-  button.noanim:disabled {
-    background: #009632;
-  }
-  button.disabled-btn,
-  button:disabled {
-    background: #444 !important;
-    color: #bbb !important;
-    cursor: not-allowed !important;
-    box-shadow: none !important;
-    border: none !important;
-    opacity: 1 !important;
-    filter: grayscale(0.5);
-  }
-  button.clientupdate.noanim:disabled {
-    background: #009632 !important;
+  .action-buttons button.clientupdate.noanim:disabled {
+    background: linear-gradient(180deg, #30a85e 0%, #248a4e 100%) !important;
     color: #fff !important;
-    border: none !important;
-    filter: none !important;
-    box-shadow: none !important;
-    opacity: 1 !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    box-shadow: 0 2px 12px rgba(36, 138, 78, 0.3) !important;
     cursor: not-allowed !important;
+    filter: none !important;
+    opacity: 1 !important;
+    animation: none !important;
+  }
+
+  .action-buttons .button-group > button.disabled-btn,
+  .action-buttons .button-group > button:disabled.disabled-btn {
+    background: rgba(255, 255, 255, 0.06) !important;
+    color: var(--text-subtle) !important;
+    border: 1px solid var(--border) !important;
+    box-shadow: none !important;
+    cursor: not-allowed !important;
+    opacity: 0.85 !important;
+    filter: none !important;
+    animation: none !important;
   }
 </style>

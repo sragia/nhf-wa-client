@@ -578,7 +578,7 @@ async fn set_start_on_startup(_app_handle: tauri::AppHandle, enabled: bool) -> R
         let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_WRITE)
             .map_err(|e| format!("Failed to open registry key: {}", e))?;
         
-        let app_name = "NHF Aura Manager";
+        let app_name = "NHF Addon Manager";
         let exe_path = std::env::current_exe()
             .map_err(|e| format!("Failed to get app executable path: {}", e))?;
         
@@ -619,7 +619,7 @@ async fn get_start_on_startup() -> Result<bool, String> {
         let run_key = hkcu.open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Run", KEY_READ)
             .map_err(|e| format!("Failed to open registry key: {}", e))?;
         
-        let app_name = "NHF Aura Manager";
+        let app_name = "NHF Addon Manager";
         match run_key.get_value::<String, _>(app_name) {
             Ok(_) => {
                 // App is set to start on startup (regardless of minimized flag)
@@ -675,7 +675,7 @@ pub fn run() {
             let start_minimized = args.iter().any(|arg| arg == "--minimized");
             
             // Create tray menu
-            let show_item = MenuItem::with_id(app, "show", "Show NHF Aura Manager", true, None::<&str>)?;
+            let show_item = MenuItem::with_id(app, "show", "Show NHF Addon Manager", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
@@ -718,6 +718,11 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                // Windows can still apply a square drop shadow unless disabled at runtime.
+                let _ = window.set_shadow(false);
+            }
 
             // Hide window if started with --minimized flag
             if start_minimized {

@@ -10,14 +10,19 @@
     "frontendDist": "../build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "NHF Addon Manager",
         "width": 800,
-        "height": 680,
-        "backgroundColor": "#1e1e1e",
-        "titleBarStyle": "Transparent",
-        "resizable": false
+        "height": 700,
+        "backgroundColor": "#00000000",
+        "decorations": false,
+        "shadow": false,
+        "transparent": true,
+        "theme": "Dark",
+        "resizable": false,
+        "scrollBarStyle": "fluentOverlay"
       }
     ],
     "security": {
