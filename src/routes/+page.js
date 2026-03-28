@@ -2,37 +2,34 @@ import { PUBLIC_SERVER_HOST } from "$env/static/public";
 import { getVersion } from '@tauri-apps/api/app';
 import { load as loadStore } from '@tauri-apps/plugin-store';
 import { getCurrentAddonVersion, getCurrentNSRaidToolsVersion, getCurrentM33kAurasVersion, getCurrentLiquidRemindersVersion, compareVersions } from './addonService';
+import { fetchJsonWithRetry, fetchWithRetry } from './networkRetry.js';
 
-/**
- * @param {{ fetch: typeof window.fetch }} param0
- */
-export const load = async ({ fetch }) => {
+/** @param {string | undefined | null} apiKey */
+const AUTH_HEADER = (apiKey) => ({
+    "Authorization": apiKey ?? "",
+});
+
+export const load = async () => {
     const store = await loadStore('store.json');
     const apiKey = await store?.get('api_key');
-    const latestClient = fetch(PUBLIC_SERVER_HOST + "/getLatestClient", {
-        headers: {
-            "Authorization": apiKey
-        }
-    })
-        .then(response => response.json());
-    const latestAddon = fetch(PUBLIC_SERVER_HOST + "/getLatestAddon", {
-        headers: {
-            "Authorization": apiKey
-        }
-    })
-        .then(response => response.json());
-    const latestLiquidReminders = fetch(PUBLIC_SERVER_HOST + "/getLatestLiquidReminders", {
-        headers: {
-            "Authorization": apiKey
-        }
-    })
-        .then(response => response.json());
+
+    const latestClient = fetchJsonWithRetry(
+        PUBLIC_SERVER_HOST + "/getLatestClient",
+        { headers: AUTH_HEADER(apiKey) },
+    );
+    const latestAddon = fetchJsonWithRetry(
+        PUBLIC_SERVER_HOST + "/getLatestAddon",
+        { headers: AUTH_HEADER(apiKey) },
+    );
+    const latestLiquidReminders = fetchJsonWithRetry(
+        PUBLIC_SERVER_HOST + "/getLatestLiquidReminders",
+        { headers: AUTH_HEADER(apiKey) },
+    );
+
     return {
         isServerUp: new Promise((resolve) => {
-            fetch(PUBLIC_SERVER_HOST + "/ping", {
-                headers: {
-                    "Authorization": apiKey
-                }
+            fetchWithRetry(PUBLIC_SERVER_HOST + "/ping", {
+                headers: AUTH_HEADER(apiKey),
             })
                 .then(() => resolve(true))
                 .catch(() => resolve(false));
@@ -54,7 +51,7 @@ export const load = async ({ fetch }) => {
                         isCurrent: false,
                         currentVersion: currentVersion,
                     });
-                });
+                })
             })
         }),
         addon: new Promise((resolve) => {
@@ -86,10 +83,10 @@ export const load = async ({ fetch }) => {
             })
         }),
         nsRaidTools: new Promise((resolve) => {
-            fetch('https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest')
-                .then(response => response.json())
+            fetchJsonWithRetry('https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest')
                 .then((data) => {
                     const resolvedData = { isCurrent: false, currentVersion: 'N/A', isActive: true, isInstalled: false };
+                    const remoteTag = data.tag_name ?? '';
                     getCurrentNSRaidToolsVersion().then((currentVersion) => {
                         if (!currentVersion) {
                             resolvedData.isCurrent = false;
@@ -97,7 +94,7 @@ export const load = async ({ fetch }) => {
                             resolvedData.isInstalled = false;
                         } else {
                             resolvedData.currentVersion = currentVersion;
-                            resolvedData.isCurrent = compareVersions(data.tag_name, currentVersion) === 0;
+                            resolvedData.isCurrent = compareVersions(remoteTag, currentVersion) === 0;
                             resolvedData.isInstalled = true;
                         }
                         resolve(resolvedData);
@@ -110,15 +107,40 @@ export const load = async ({ fetch }) => {
                                 currentVersion: currentVersion || 'N/A',
                                 isInstalled: !!currentVersion
                             })
-                        })
+                        }).catch(() => {
+                            resolve({
+                                isActive: false,
+                                isCurrent: false,
+                                currentVersion: 'N/A',
+                                isInstalled: false
+                            });
+                        });
                     })
                 })
+                .catch((error) => {
+                    console.error(error);
+                    getCurrentNSRaidToolsVersion().then((currentVersion) => {
+                        resolve({
+                            isActive: false,
+                            isCurrent: false,
+                            currentVersion: currentVersion || 'N/A',
+                            isInstalled: !!currentVersion
+                        });
+                    }).catch(() => {
+                        resolve({
+                            isActive: false,
+                            isCurrent: false,
+                            currentVersion: 'N/A',
+                            isInstalled: false
+                        });
+                    });
+                });
         }),
         m33kAuras: new Promise((resolve) => {
-            fetch('https://api.github.com/repos/m33shoq/M33kAuras/releases/latest')
-                .then(response => response.json())
+            fetchJsonWithRetry('https://api.github.com/repos/m33shoq/M33kAuras/releases/latest')
                 .then((data) => {
                     const resolvedData = { isCurrent: false, currentVersion: 'N/A', isActive: true, isInstalled: false };
+                    const remoteTag = data.tag_name ?? '';
                     getCurrentM33kAurasVersion().then((currentVersion) => {
                         if (!currentVersion) {
                             resolvedData.isCurrent = false;
@@ -126,7 +148,7 @@ export const load = async ({ fetch }) => {
                             resolvedData.isInstalled = false;
                         } else {
                             resolvedData.currentVersion = currentVersion;
-                            resolvedData.isCurrent = compareVersions(data.tag_name, currentVersion) === 0;
+                            resolvedData.isCurrent = compareVersions(remoteTag, currentVersion) === 0;
                             resolvedData.isInstalled = true;
                         }
                         resolve(resolvedData);
@@ -139,9 +161,34 @@ export const load = async ({ fetch }) => {
                                 currentVersion: currentVersion || 'N/A',
                                 isInstalled: !!currentVersion
                             })
-                        })
+                        }).catch(() => {
+                            resolve({
+                                isActive: false,
+                                isCurrent: false,
+                                currentVersion: 'N/A',
+                                isInstalled: false
+                            });
+                        });
                     })
                 })
+                .catch((error) => {
+                    console.error(error);
+                    getCurrentM33kAurasVersion().then((currentVersion) => {
+                        resolve({
+                            isActive: false,
+                            isCurrent: false,
+                            currentVersion: currentVersion || 'N/A',
+                            isInstalled: !!currentVersion
+                        });
+                    }).catch(() => {
+                        resolve({
+                            isActive: false,
+                            isCurrent: false,
+                            currentVersion: 'N/A',
+                            isInstalled: false
+                        });
+                    });
+                });
         }),
         liquidReminders: new Promise((resolve) => {
             latestLiquidReminders.then((data) => {
@@ -165,8 +212,7 @@ export const load = async ({ fetch }) => {
                     resolve({
                         isActive: false,
                         isCurrent: false,
-                        currentVersion: currentVersion || 'N/A',
-                        isInstalled: !!currentVersion
+                        currentVersion: currentVersion || 'N/A'
                     });
                 })
             })

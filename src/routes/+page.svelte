@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateAll } from "$app/navigation";
   import { open } from "@tauri-apps/plugin-dialog";
   import { load } from "@tauri-apps/plugin-store";
   import { download } from "@tauri-apps/plugin-upload";
@@ -9,6 +10,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open as openShell } from "@tauri-apps/plugin-shell";
   import { listen } from "@tauri-apps/api/event";
+  import { fetchJsonWithRetry } from "./networkRetry.js";
 
   let wowFolder = $state("");
   let apiKey = $state("");
@@ -54,6 +56,28 @@
     setTimeout(() => {
       notification.show = false;
     }, 5000);
+  }
+
+  async function downloadWithRetry(
+    url: string,
+    path: string,
+    onProgress: (progress: any) => void,
+    headers: Map<string, string> | undefined,
+    maxAttempts = 4,
+  ): Promise<void> {
+    let last: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await download(url, path, onProgress, headers);
+        return;
+      } catch (e) {
+        last = e;
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 600 * attempt * attempt));
+        }
+      }
+    }
+    throw last;
   }
 
   // Button text state variables
@@ -347,7 +371,7 @@
     if (!wowFolder || !apiKey || isInstalling) return;
     try {
       isInstalling = true;
-      await download(
+      await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/addon.zip",
         "./addon.zip",
         (progress) => {
@@ -392,22 +416,24 @@
     if (!wowFolder || !apiKey || isNSInstalling) return;
     try {
       isNSInstalling = true;
-      const response = await fetch(
+      const nsData = await fetchJsonWithRetry(
         "https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest",
       );
-      const nsData = await response.json();
-      const asset = nsData.assets.find(
-        (asset: any) => asset.content_type === "application/zip",
+      const asset = nsData.assets?.find(
+        (a: { content_type: string }) => a.content_type === "application/zip",
       );
-      const downloadUrl = asset.browser_download_url;
-      await download(downloadUrl, "./nsRaidTools.zip", (progress) => {
+      const downloadUrl = asset?.browser_download_url;
+      if (!downloadUrl) {
+        throw new Error("No NS Raid Tools zip in latest release");
+      }
+      await downloadWithRetry(downloadUrl, "./nsRaidTools.zip", (progress) => {
         console.log(
           progress.progress,
           progress.progressTotal,
           progress.transferSpeed,
           progress,
         );
-      });
+      }, undefined);
       await extractNSRaidToolsZip();
     } catch (error) {
       isNSInstalling = false;
@@ -440,22 +466,24 @@
     if (!wowFolder || !apiKey || isM33Installing) return;
     try {
       isM33Installing = true;
-      const response = await fetch(
+      const m33Data = await fetchJsonWithRetry(
         "https://api.github.com/repos/m33shoq/M33kAuras/releases/latest",
       );
-      const m33Data = await response.json();
-      const asset = m33Data.assets.find(
-        (asset: any) => asset.content_type === "application/zip",
+      const asset = m33Data.assets?.find(
+        (a: { content_type: string }) => a.content_type === "application/zip",
       );
-      const downloadUrl = asset.browser_download_url;
-      await download(downloadUrl, "./m33kAuras.zip", (progress) => {
+      const downloadUrl = asset?.browser_download_url;
+      if (!downloadUrl) {
+        throw new Error("No M33kAuras zip in latest release");
+      }
+      await downloadWithRetry(downloadUrl, "./m33kAuras.zip", (progress) => {
         console.log(
           progress.progress,
           progress.progressTotal,
           progress.transferSpeed,
           progress,
         );
-      });
+      }, undefined);
       await extractM33kAurasZip();
     } catch (error) {
       isM33Installing = false;
@@ -490,7 +518,7 @@
       isLRInstalling = true;
       let downloadComplete = false;
 
-      await download(
+      await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/liquidReminders.zip",
         "./liquidReminders.zip",
         (progress) => {
@@ -534,15 +562,39 @@
   };
 
   const updateClient = async () => {
-    const update = await clientCheck({
-      headers: {
-        Authorization: apiKey,
-      },
-    });
-    if (update) {
-      await update.downloadAndInstall();
-      console.log("update installed");
-      await relaunch();
+    if (!apiKey) {
+      showNotification("Set your API key before updating the client.", "error");
+      return;
+    }
+    const timeoutMs = 120_000;
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const update = await clientCheck({
+          headers: { Authorization: apiKey },
+          timeout: timeoutMs,
+        });
+        if (update) {
+          await update.downloadAndInstall(undefined, { timeout: timeoutMs });
+          console.log("update installed");
+          await relaunch();
+        }
+        return;
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? error.message : String(error ?? "Unknown error");
+        if (attempt === maxAttempts) {
+          console.error(error);
+          showNotification(
+            msg.length > 160
+              ? `${msg.slice(0, 160)}…`
+              : msg || "Client update failed. Check your connection and try again.",
+            "error",
+          );
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 500 * attempt * attempt));
+      }
     }
   };
 
@@ -600,7 +652,7 @@
       isInstalling = true; // Set button state
 
       console.log("Starting download of NHF Addon...");
-      await download(
+      await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/addon.zip",
         "./addon.zip",
         (progress) => {
@@ -632,19 +684,21 @@
       isNSInstalling = true; // Set button state
 
       console.log("Fetching NS Raid Tools release info...");
-      const response = await fetch(
+      const nsData = await fetchJsonWithRetry(
         "https://api.github.com/repos/Reloe/NorthernSkyRaidTools/releases/latest",
       );
-      const nsData = await response.json();
-      const asset = nsData.assets.find(
-        (asset: any) => asset.content_type === "application/zip",
+      const asset = nsData.assets?.find(
+        (a: { content_type: string }) => a.content_type === "application/zip",
       );
-      const downloadUrl = asset.browser_download_url;
+      const downloadUrl = asset?.browser_download_url;
+      if (!downloadUrl) {
+        throw new Error("No NS Raid Tools zip in latest release");
+      }
       console.log("Starting download of NS Raid Tools...");
 
-      await download(downloadUrl, "./nsRaidTools.zip", (progress) => {
+      await downloadWithRetry(downloadUrl, "./nsRaidTools.zip", (progress) => {
         console.log("NS Raid Tools download progress:", progress);
-      });
+      }, undefined);
 
       console.log("NS Raid Tools download complete, starting extraction...");
       // Extract immediately without timer
@@ -669,19 +723,21 @@
       isM33Installing = true;
 
       console.log("Fetching M33kAuras release info...");
-      const response = await fetch(
+      const m33Data = await fetchJsonWithRetry(
         "https://api.github.com/repos/m33shoq/M33kAuras/releases/latest",
       );
-      const m33Data = await response.json();
-      const asset = m33Data.assets.find(
-        (asset: any) => asset.content_type === "application/zip",
+      const asset = m33Data.assets?.find(
+        (a: { content_type: string }) => a.content_type === "application/zip",
       );
-      const downloadUrl = asset.browser_download_url;
+      const downloadUrl = asset?.browser_download_url;
+      if (!downloadUrl) {
+        throw new Error("No M33kAuras zip in latest release");
+      }
       console.log("Starting download of M33kAuras...");
 
-      await download(downloadUrl, "./m33kAuras.zip", (progress) => {
+      await downloadWithRetry(downloadUrl, "./m33kAuras.zip", (progress) => {
         console.log("M33kAuras download progress:", progress);
-      });
+      }, undefined);
 
       console.log("M33kAuras download complete, starting extraction...");
       await validateAndExtractZip(
@@ -705,7 +761,7 @@
       isLRInstalling = true; // Set button state
 
       console.log("Starting download of Liquid Reminders...");
-      await download(
+      await downloadWithRetry(
         PUBLIC_SERVER_HOST + "/assets/liquidReminders.zip",
         "./liquidReminders.zip",
         (progress) => {
@@ -744,6 +800,7 @@
     }
 
     try {
+      await invalidateAll();
       const updatesNeeded = [];
 
       // Check each addon for updates, but handle cases where addons might not be installed
