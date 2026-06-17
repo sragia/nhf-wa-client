@@ -170,6 +170,15 @@ fn read_file(file_path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn write_file(file_path: String, contents: String) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
 #[derive(Serialize, Deserialize)]
 struct BackupProgress {
     progress: u32,
@@ -652,6 +661,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_upload::init())
+        .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init());
@@ -737,6 +747,7 @@ pub fn run() {
             greet,
             extract_zip,
             read_file,
+            write_file,
             validate_zip,
             get_zip_info,
             backup_weakauras,

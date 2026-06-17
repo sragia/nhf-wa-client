@@ -13,6 +13,12 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { fetchJsonWithRetry } from "./networkRetry.js";
   import { getPendingAutoUpdateIds } from "./addonUpdateCheck.js";
+  import {
+    fetchAndWriteCompanionAddon,
+    fetchCompanionSeasons,
+    type CompanionSeason,
+  } from "./companionService";
+  import { Package, Link2, Download, LoaderCircle } from "@lucide/svelte";
 
   async function titleBarMinimize() {
     try {
@@ -64,6 +70,17 @@
   // Startup functionality
   let startOnStartup = $state(false);
 
+  type ActiveView = "manager" | "companion";
+  let activeView = $state<ActiveView>("manager");
+  let externalApiKey = $state("");
+  let companionSeasonId = $state("");
+  let companionSeasons = $state<CompanionSeason[]>([]);
+  let companionCurrentSeasonId = $state("");
+  let isSeasonsLoading = $state(false);
+  let seasonsLoadError = $state("");
+  let companionLastFetch = $state("");
+  let isCompanionFetching = $state(false);
+
   type InstallDockPhase = "download" | "extract" | "backup";
 
   let installDock = $state({
@@ -85,8 +102,7 @@
     const cur = Number(p.progress) || 0;
     const total = Number(p.progressTotal) || 0;
     const speed = Number(p.transferSpeed) || 0;
-    const pct =
-      total > 0 ? Math.min(100, Math.round((cur / total) * 100)) : 0;
+    const pct = total > 0 ? Math.min(100, Math.round((cur / total) * 100)) : 0;
     let detail = "";
     if (total > 0) {
       detail = `${formatBytes(cur)} / ${formatBytes(total)}`;
@@ -343,6 +359,26 @@
         } catch (error) {
           console.error("Failed to sync start on startup setting:", error);
         }
+      }
+
+      const storedExternalApiKey = await store.get("external_api_key");
+      const storedCompanionLastFetch = await store.get("companion_last_fetch");
+      const storedCompanionSeasonId = await store.get("companion_season_id");
+
+      if (storedExternalApiKey && typeof storedExternalApiKey === "string") {
+        externalApiKey = storedExternalApiKey;
+      }
+      if (
+        storedCompanionLastFetch &&
+        typeof storedCompanionLastFetch === "string"
+      ) {
+        companionLastFetch = storedCompanionLastFetch;
+      }
+      if (
+        storedCompanionSeasonId &&
+        typeof storedCompanionSeasonId === "string"
+      ) {
+        companionSeasonId = storedCompanionSeasonId;
       }
     }
   };
@@ -737,6 +773,91 @@
     await refreshPageData();
   };
 
+  const updateExternalApiKey = async () => {
+    if (!store) return;
+    await store.set("external_api_key", externalApiKey);
+    await loadCompanionSeasons();
+  };
+
+  const updateCompanionSeasonId = async () => {
+    if (!store) return;
+    await store.set("companion_season_id", companionSeasonId);
+  };
+
+  async function loadCompanionSeasons() {
+    const trimmedKey = externalApiKey.trim();
+    if (!trimmedKey) {
+      companionSeasons = [];
+      companionCurrentSeasonId = "";
+      seasonsLoadError = "";
+      return;
+    }
+
+    isSeasonsLoading = true;
+    seasonsLoadError = "";
+    try {
+      const seasonsResponse = await fetchCompanionSeasons(trimmedKey);
+      companionSeasons = seasonsResponse.seasons ?? [];
+      companionCurrentSeasonId = seasonsResponse.currentSeasonId;
+
+      const seasonIds = new Set(companionSeasons.map((season) => season.id));
+      if (!companionSeasonId || !seasonIds.has(companionSeasonId)) {
+        companionSeasonId = seasonsResponse.currentSeasonId;
+        if (store) {
+          await store.set("companion_season_id", companionSeasonId);
+        }
+      }
+    } catch (e) {
+      companionSeasons = [];
+      companionCurrentSeasonId = "";
+      seasonsLoadError =
+        e instanceof Error ? e.message : "Failed to load seasons.";
+    } finally {
+      isSeasonsLoading = false;
+    }
+  }
+
+  function openCompanionView() {
+    activeView = "companion";
+    void loadCompanionSeasons();
+  }
+
+  const canFetchCompanion = $derived(
+    !!wowFolder &&
+      isRetailWowPath(wowFolder) &&
+      !!externalApiKey.trim() &&
+      !isCompanionFetching,
+  );
+
+  async function fetchCompanionData() {
+    if (!canFetchCompanion) return;
+
+    isCompanionFetching = true;
+    try {
+      const result = await fetchAndWriteCompanionAddon(
+        wowFolder,
+        externalApiKey,
+        companionSeasonId || undefined,
+      );
+
+      companionLastFetch = result.fetchedAt;
+      if (store) {
+        await store.set("companion_last_fetch", result.fetchedAt);
+      }
+
+      showNotification(
+        `Companion data written (${result.bossCount} bosses, season ${result.seasonId}). /reload in WoW to load.`,
+        "success",
+      );
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "Failed to fetch companion data.";
+      showNotification(message, "error");
+    } finally {
+      isCompanionFetching = false;
+    }
+  }
+
   const updateClient = async () => {
     if (!apiKey) {
       showNotification("Set your API key before updating the client.", "error");
@@ -865,7 +986,10 @@
     try {
       console.log("Auto-updating NS Raid Tools...");
       isNSInstalling = true; // Set button state
-      openInstallDock("NS Raid Tools (auto-update)", "Fetching latest release…");
+      openInstallDock(
+        "NS Raid Tools (auto-update)",
+        "Fetching latest release…",
+      );
 
       console.log("Fetching NS Raid Tools release info...");
       const nsData = await fetchJsonWithRetry(
@@ -1225,7 +1349,13 @@
 
   <div class="title-bar">
     <div class="title-bar-drag" data-tauri-drag-region>
-      <img src="/icon.png" alt="" class="title-bar-icon" width="18" height="18" />
+      <img
+        src="/icon.png"
+        alt=""
+        class="title-bar-icon"
+        width="18"
+        height="18"
+      />
       <span class="title-bar-text">NHF Addon Manager</span>
     </div>
     <div class="title-bar-controls">
@@ -1236,10 +1366,7 @@
         onclick={titleBarMinimize}
       >
         <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"
-          ><path
-            fill="currentColor"
-            d="M0 5h10v1H0z"
-          /></svg
+          ><path fill="currentColor" d="M0 5h10v1H0z" /></svg
         >
       </button>
       <button
@@ -1261,376 +1388,512 @@
     </div>
   </div>
 
-  <div class="main-content">
-    <div class="left-panel">
-      <section class="panel-section">
-        <h2 class="panel-section-title">Setup</h2>
-        <div class="input">
-          <label for="wow_folder">WoW folder</label>
-          <div class="folder-picker-row">
-            <input
-              type="text"
-              name="folder"
-              id="wow_folder"
-              bind:value={wowFolder}
-              placeholder="…\World of Warcraft\_retail_"
-              autocomplete="off"
-              onclick={openFolder}
-              onblur={onWowFolderBlur}
-            />
-            <button
-              type="button"
-              class="browse-folder-btn"
-              onclick={openFolder}
-              title="Open File Explorer to select WoW folder"
-              aria-label="Browse for WoW folder"
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path
-                  d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-                />
-              </svg>
-            </button>
-          </div>
-        </div>
-        <div class="input">
-          <label for="api_key">API key (from Discord)</label>
-          <input
-            name="api_key"
-            id="api_key"
-            bind:value={apiKey}
-            onchange={updateKey}
-          />
-        </div>
-      </section>
+  <nav class="view-nav" aria-label="Main views">
+    <button
+      type="button"
+      class="view-nav-btn"
+      class:view-nav-btn-active={activeView === "manager"}
+      onclick={() => (activeView = "manager")}
+    >
+      <Package size={14} strokeWidth={2.25} aria-hidden="true" />
+      <span>Addons</span>
+    </button>
+    <button
+      type="button"
+      class="view-nav-btn"
+      class:view-nav-btn-active={activeView === "companion"}
+      onclick={openCompanionView}
+    >
+      <Link2 size={14} strokeWidth={2.25} aria-hidden="true" />
+      <span>Companion</span>
+    </button>
+  </nav>
 
-      <section class="panel-section">
-        <h2 class="panel-section-title">App behavior</h2>
-        <div class="checkbox-list">
-          <div class="checkbox-group">
-            <input
-              type="checkbox"
-              id="minimize_to_tray"
-              bind:checked={minimizeToTray}
-              onchange={updateMinimizeToTray}
-            />
-            <label for="minimize_to_tray">Hide to tray instead of close</label>
-          </div>
-
-          <div class="checkbox-group">
-            <input
-              type="checkbox"
-              id="auto_update"
-              bind:checked={autoUpdate}
-              onchange={updateAutoUpdateSetting}
-            />
-            <label for="auto_update">Auto-update addons</label>
-          </div>
-
-          <div class="checkbox-group">
-            <input
-              type="checkbox"
-              id="start_on_startup"
-              bind:checked={startOnStartup}
-              onchange={updateStartOnStartupSetting}
-            />
-            <label for="start_on_startup">Start when Windows starts</label>
-          </div>
-        </div>
-      </section>
-
-      <div class="backup-section">
-        <h2 class="panel-section-title">WeakAuras backup</h2>
-        <div class="checkbox-group">
-          <input
-            type="checkbox"
-            id="backup_enabled"
-            bind:checked={backupEnabled}
-            onchange={updateBackupSettings}
-          />
-          <label for="backup_enabled">Enable Backup</label>
-        </div>
-
-        {#if backupEnabled}
-          <div class="checkbox-group">
-            <input
-              type="checkbox"
-              id="backup_on_startup"
-              bind:checked={backupOnStartup}
-              onchange={updateBackupSettings}
-            />
-            <label for="backup_on_startup">Backup on App Start</label>
-          </div>
-
-          <div class="checkbox-group">
-            <input
-              type="checkbox"
-              id="backup_all_data"
-              bind:checked={backupAllData}
-              onchange={updateBackupSettings}
-            />
-            <label for="backup_all_data">Backup All Addons</label>
-          </div>
-
-          {#if lastBackupTime}
-            <div class="last-backup-info">
-              <div class="last-backup-text">
-                <span class="last-backup-label">Last backup:</span>
-                <span class="last-backup-time">{lastBackupTime}</span>
-              </div>
+  {#if activeView === "manager"}
+    <div class="main-content">
+      <div class="left-panel">
+        <section class="panel-section">
+          <h2 class="panel-section-title">Setup</h2>
+          <div class="input">
+            <label for="wow_folder">WoW folder</label>
+            <div class="folder-picker-row">
+              <input
+                type="text"
+                name="folder"
+                id="wow_folder"
+                bind:value={wowFolder}
+                autocomplete="off"
+                onclick={openFolder}
+                onblur={onWowFolderBlur}
+              />
               <button
                 type="button"
-                class="folder-button"
-                onclick={openBackupFolder}
-                title="Open backup folder"
+                class="browse-folder-btn"
+                onclick={openFolder}
+                title="Open File Explorer to select WoW folder"
+                aria-label="Browse for WoW folder"
               >
-                📁 Open
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                  />
+                </svg>
               </button>
             </div>
+          </div>
+          <div class="input">
+            <label for="api_key">API key (from Discord)</label>
+            <input
+              name="api_key"
+              id="api_key"
+              bind:value={apiKey}
+              onchange={updateKey}
+            />
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <h2 class="panel-section-title">App behavior</h2>
+          <div class="checkbox-list">
+            <div class="checkbox-group">
+              <input
+                type="checkbox"
+                id="minimize_to_tray"
+                bind:checked={minimizeToTray}
+                onchange={updateMinimizeToTray}
+              />
+              <label for="minimize_to_tray">Hide to tray instead of close</label
+              >
+            </div>
+
+            <div class="checkbox-group">
+              <input
+                type="checkbox"
+                id="auto_update"
+                bind:checked={autoUpdate}
+                onchange={updateAutoUpdateSetting}
+              />
+              <label for="auto_update">Auto-update addons</label>
+            </div>
+
+            <div class="checkbox-group">
+              <input
+                type="checkbox"
+                id="start_on_startup"
+                bind:checked={startOnStartup}
+                onchange={updateStartOnStartupSetting}
+              />
+              <label for="start_on_startup">Start when Windows starts</label>
+            </div>
+          </div>
+        </section>
+
+        <div class="backup-section">
+          <h2 class="panel-section-title">WeakAuras backup</h2>
+          <div class="checkbox-group">
+            <input
+              type="checkbox"
+              id="backup_enabled"
+              bind:checked={backupEnabled}
+              onchange={updateBackupSettings}
+            />
+            <label for="backup_enabled">Enable Backup</label>
+          </div>
+
+          {#if backupEnabled}
+            <div class="checkbox-group">
+              <input
+                type="checkbox"
+                id="backup_on_startup"
+                bind:checked={backupOnStartup}
+                onchange={updateBackupSettings}
+              />
+              <label for="backup_on_startup">Backup on App Start</label>
+            </div>
+
+            <div class="checkbox-group">
+              <input
+                type="checkbox"
+                id="backup_all_data"
+                bind:checked={backupAllData}
+                onchange={updateBackupSettings}
+              />
+              <label for="backup_all_data">Backup All Addons</label>
+            </div>
+
+            {#if lastBackupTime}
+              <div class="last-backup-info">
+                <div class="last-backup-text">
+                  <span class="last-backup-label">Last backup:</span>
+                  <span class="last-backup-time">{lastBackupTime}</span>
+                </div>
+                <button
+                  type="button"
+                  class="folder-button"
+                  onclick={openBackupFolder}
+                  title="Open backup folder"
+                >
+                  📁 Open
+                </button>
+              </div>
+            {/if}
+
+            <button
+              type="button"
+              class="backup-button"
+              disabled={!wowFolder || isBackingUp}
+              onclick={backupWeakAuras}
+            >
+              {isBackingUp ? "Backing Up..." : "Backup Now"}
+            </button>
           {/if}
-
-          <button
-            type="button"
-            class="backup-button"
-            disabled={!wowFolder || isBackingUp}
-            onclick={backupWeakAuras}
-          >
-            {isBackingUp ? "Backing Up..." : "Backup Now"}
-          </button>
-        {/if}
+        </div>
       </div>
-    </div>
 
-    <div class="right-panel">
-      <h2 class="panel-section-title actions-heading">Addons</h2>
-      <div class="action-buttons">
-        <button
-          type="button"
-          class="refresh-button-full"
-          onclick={manualRefresh}
-          disabled={!wowFolder || !apiKey}
-        >
-          Refresh status
-        </button>
-
-        <div class="button-group">
-          <div class="button-group-label-col">
-            <label for="nhf-addon-btn">NHF Addon</label>
-            {#if !wowFolder || !apiKey}
-              <div
-                class="row-status row-status-idle"
-                title="Set WoW folder and API key to load version"
-              >
-                <div class="dot gray"></div>
-                <span class="row-status-version">—</span>
-              </div>
-            {:else}
-              {#await data.addon}
-                <div class="row-status row-status-loading">
-                  {@render rowAwaitSpinner()}
-                </div>
-              {:then addon}
-                <div class="row-status" title="Installed version">
-                  <div
-                    class="dot"
-                    class:gray={!addon.isActive}
-                    class:green={addon.isCurrent}
-                  ></div>
-                  <span class="row-status-version">{addon.currentVersion}</span>
-                </div>
-              {/await}
-            {/if}
-          </div>
+      <div class="right-panel">
+        <h2 class="panel-section-title actions-heading">Addons</h2>
+        <div class="action-buttons">
           <button
-            id="nhf-addon-btn"
             type="button"
-            disabled={!wowFolder || !apiKey || isInstalling}
-            class:glowing={isUpdateAvailable}
-            class:disabled-btn={!wowFolder || !apiKey}
-            onclick={update}>{getAddonButtonText()}</button
+            class="refresh-button-full"
+            onclick={manualRefresh}
+            disabled={!wowFolder || !apiKey}
           >
-        </div>
+            Refresh status
+          </button>
 
-        <div class="button-group">
-          <div class="button-group-label-col">
-            <label for="ns-raid-tools-btn">NS Raid Tools</label>
-            {#if !wowFolder || !apiKey}
-              <div
-                class="row-status row-status-idle"
-                title="Set WoW folder and API key to load version"
-              >
-                <div class="dot gray"></div>
-                <span class="row-status-version">—</span>
-              </div>
-            {:else}
-              {#await data.nsRaidTools}
-                <div class="row-status row-status-loading">
-                  {@render rowAwaitSpinner()}
-                </div>
-              {:then addon}
-                <div class="row-status" title="Installed version">
-                  <div
-                    class="dot"
-                    class:gray={!addon.isActive}
-                    class:green={addon.isCurrent}
-                  ></div>
-                  <span class="row-status-version">{addon.currentVersion}</span>
-                </div>
-              {/await}
-            {/if}
-          </div>
-          <button
-            id="ns-raid-tools-btn"
-            type="button"
-            disabled={!wowFolder || !apiKey || isNSInstalling}
-            class:glowing={isNSUpdateAvailable}
-            class:disabled-btn={!wowFolder || !apiKey}
-            onclick={updateNSRaidTools}>{getNSButtonText()}</button
-          >
-        </div>
-
-        <div class="button-group">
-          <div class="button-group-label-col">
-            <label for="m33k-auras-btn">M33kAuras</label>
-            {#if !wowFolder || !apiKey}
-              <div
-                class="row-status row-status-idle"
-                title="Set WoW folder and API key to load version"
-              >
-                <div class="dot gray"></div>
-                <span class="row-status-version">—</span>
-              </div>
-            {:else}
-              {#await data.m33kAuras}
-                <div class="row-status row-status-loading">
-                  {@render rowAwaitSpinner()}
-                </div>
-              {:then addon}
-                <div class="row-status" title="Installed version">
-                  <div
-                    class="dot"
-                    class:gray={!addon.isActive}
-                    class:green={addon.isCurrent}
-                  ></div>
-                  <span class="row-status-version">{addon.currentVersion}</span>
-                </div>
-              {/await}
-            {/if}
-          </div>
-          <button
-            id="m33k-auras-btn"
-            type="button"
-            disabled={!wowFolder || !apiKey || isM33Installing}
-            class:glowing={isM33UpdateAvailable}
-            class:disabled-btn={!wowFolder || !apiKey}
-            onclick={updateM33kAuras}>{getM33ButtonText()}</button
-          >
-        </div>
-
-        <div class="button-group">
-          <div class="button-group-label-col">
-            <label for="liquid-reminders-btn">Liquid Reminders</label>
-            {#if !wowFolder || !apiKey}
-              <div
-                class="row-status row-status-idle"
-                title="Set WoW folder and API key to load version"
-              >
-                <div class="dot gray"></div>
-                <span class="row-status-version">—</span>
-              </div>
-            {:else}
-              {#await data.liquidReminders}
-                <div class="row-status row-status-loading">
-                  {@render rowAwaitSpinner()}
-                </div>
-              {:then addon}
-                <div class="row-status" title="Installed version">
-                  <div
-                    class="dot"
-                    class:gray={!addon.isActive}
-                    class:green={addon.isCurrent}
-                  ></div>
-                  <span class="row-status-version">{addon.currentVersion}</span>
-                </div>
-              {/await}
-            {/if}
-          </div>
-          <button
-            id="liquid-reminders-btn"
-            type="button"
-            disabled={!wowFolder || !apiKey || isLRInstalling}
-            class:glowing={isLRUpdateAvailable}
-            class:disabled-btn={!wowFolder || !apiKey}
-            onclick={updateLiquidReminders}>{getLRButtonText()}</button
-          >
-        </div>
-
-        <div class="button-group">
-          {#await data.client}
+          <div class="button-group">
             <div class="button-group-label-col">
-              <label for="client-update-btn">Client Update</label>
-              <div class="row-status row-status-loading">
-                {@render rowAwaitSpinner()}
-              </div>
-            </div>
-            <div class="client-button-wrap">
-              {@render rowAwaitSpinner()}
-            </div>
-          {:then client}
-            <div class="button-group-label-col">
-              <label for="client-update-btn">Client Update</label>
-              <div class="row-status" title="Running version">
+              <label for="nhf-addon-btn">NHF Addon</label>
+              {#if !wowFolder || !apiKey}
                 <div
-                  class="dot"
-                  class:gray={!client.isActive}
-                  class:green={client.isCurrent}
-                ></div>
-                <span class="row-status-version">{client.currentVersion}</span>
-              </div>
-            </div>
-            <div class="client-button-wrap">
-              {#if !client.isCurrent}
-                <button
-                  id="client-update-btn"
-                  class="clientupdate glowing"
-                  onclick={updateClient}>Update</button
+                  class="row-status row-status-idle"
+                  title="Set WoW folder and API key to load version"
                 >
+                  <div class="dot gray"></div>
+                  <span class="row-status-version">—</span>
+                </div>
               {:else}
-                <button
-                  id="client-update-btn"
-                  class="clientupdate noanim"
-                  disabled>Up To Date</button
-                >
+                {#await data.addon}
+                  <div class="row-status row-status-loading">
+                    {@render rowAwaitSpinner()}
+                  </div>
+                {:then addon}
+                  <div class="row-status" title="Installed version">
+                    <div
+                      class="dot"
+                      class:gray={!addon.isActive}
+                      class:green={addon.isCurrent}
+                    ></div>
+                    <span class="row-status-version"
+                      >{addon.currentVersion}</span
+                    >
+                  </div>
+                {/await}
               {/if}
             </div>
-          {/await}
-        </div>
-
-        {#if isAutoUpdating}
-          <div class="auto-update-info">
-            <div class="update-status">
-              <span>Auto-updating: {currentUpdating}</span>
-            </div>
-            {#if updateQueue.length > 0}
-              <div class="update-queue">
-                <span>Update queue: {updateQueue.length} addon(s) pending</span>
-              </div>
-            {/if}
+            <button
+              id="nhf-addon-btn"
+              type="button"
+              disabled={!wowFolder || !apiKey || isInstalling}
+              class:glowing={isUpdateAvailable}
+              class:btn-reinstall={!isUpdateAvailable}
+              class:disabled-btn={!wowFolder || !apiKey}
+              onclick={update}>{getAddonButtonText()}</button
+            >
           </div>
-        {/if}
+
+          <div class="button-group">
+            <div class="button-group-label-col">
+              <label for="ns-raid-tools-btn">NS Raid Tools</label>
+              {#if !wowFolder || !apiKey}
+                <div
+                  class="row-status row-status-idle"
+                  title="Set WoW folder and API key to load version"
+                >
+                  <div class="dot gray"></div>
+                  <span class="row-status-version">—</span>
+                </div>
+              {:else}
+                {#await data.nsRaidTools}
+                  <div class="row-status row-status-loading">
+                    {@render rowAwaitSpinner()}
+                  </div>
+                {:then addon}
+                  <div class="row-status" title="Installed version">
+                    <div
+                      class="dot"
+                      class:gray={!addon.isActive}
+                      class:green={addon.isCurrent}
+                    ></div>
+                    <span class="row-status-version"
+                      >{addon.currentVersion}</span
+                    >
+                  </div>
+                {/await}
+              {/if}
+            </div>
+            <button
+              id="ns-raid-tools-btn"
+              type="button"
+              disabled={!wowFolder || !apiKey || isNSInstalling}
+              class:glowing={isNSUpdateAvailable}
+              class:btn-reinstall={!isNSUpdateAvailable}
+              class:disabled-btn={!wowFolder || !apiKey}
+              onclick={updateNSRaidTools}>{getNSButtonText()}</button
+            >
+          </div>
+
+          <div class="button-group">
+            <div class="button-group-label-col">
+              <label for="m33k-auras-btn">M33kAuras</label>
+              {#if !wowFolder || !apiKey}
+                <div
+                  class="row-status row-status-idle"
+                  title="Set WoW folder and API key to load version"
+                >
+                  <div class="dot gray"></div>
+                  <span class="row-status-version">—</span>
+                </div>
+              {:else}
+                {#await data.m33kAuras}
+                  <div class="row-status row-status-loading">
+                    {@render rowAwaitSpinner()}
+                  </div>
+                {:then addon}
+                  <div class="row-status" title="Installed version">
+                    <div
+                      class="dot"
+                      class:gray={!addon.isActive}
+                      class:green={addon.isCurrent}
+                    ></div>
+                    <span class="row-status-version"
+                      >{addon.currentVersion}</span
+                    >
+                  </div>
+                {/await}
+              {/if}
+            </div>
+            <button
+              id="m33k-auras-btn"
+              type="button"
+              disabled={!wowFolder || !apiKey || isM33Installing}
+              class:glowing={isM33UpdateAvailable}
+              class:btn-reinstall={!isM33UpdateAvailable}
+              class:disabled-btn={!wowFolder || !apiKey}
+              onclick={updateM33kAuras}>{getM33ButtonText()}</button
+            >
+          </div>
+
+          <div class="button-group">
+            <div class="button-group-label-col">
+              <label for="liquid-reminders-btn">Liquid Reminders</label>
+              {#if !wowFolder || !apiKey}
+                <div
+                  class="row-status row-status-idle"
+                  title="Set WoW folder and API key to load version"
+                >
+                  <div class="dot gray"></div>
+                  <span class="row-status-version">—</span>
+                </div>
+              {:else}
+                {#await data.liquidReminders}
+                  <div class="row-status row-status-loading">
+                    {@render rowAwaitSpinner()}
+                  </div>
+                {:then addon}
+                  <div class="row-status" title="Installed version">
+                    <div
+                      class="dot"
+                      class:gray={!addon.isActive}
+                      class:green={addon.isCurrent}
+                    ></div>
+                    <span class="row-status-version"
+                      >{addon.currentVersion}</span
+                    >
+                  </div>
+                {/await}
+              {/if}
+            </div>
+            <button
+              id="liquid-reminders-btn"
+              type="button"
+              disabled={!wowFolder || !apiKey || isLRInstalling}
+              class:glowing={isLRUpdateAvailable}
+              class:btn-reinstall={!isLRUpdateAvailable}
+              class:disabled-btn={!wowFolder || !apiKey}
+              onclick={updateLiquidReminders}>{getLRButtonText()}</button
+            >
+          </div>
+
+          <div class="button-group">
+            {#await data.client}
+              <div class="button-group-label-col">
+                <label for="client-update-btn">Client Update</label>
+                <div class="row-status row-status-loading">
+                  {@render rowAwaitSpinner()}
+                </div>
+              </div>
+              <div class="client-button-wrap">
+                {@render rowAwaitSpinner()}
+              </div>
+            {:then client}
+              <div class="button-group-label-col">
+                <label for="client-update-btn">Client Update</label>
+                <div class="row-status" title="Running version">
+                  <div
+                    class="dot"
+                    class:gray={!client.isActive}
+                    class:green={client.isCurrent}
+                  ></div>
+                  <span class="row-status-version">{client.currentVersion}</span
+                  >
+                </div>
+              </div>
+              <div class="client-button-wrap">
+                {#if !client.isCurrent}
+                  <button
+                    id="client-update-btn"
+                    class="clientupdate glowing"
+                    onclick={updateClient}>Update</button
+                  >
+                {:else}
+                  <button
+                    id="client-update-btn"
+                    class="clientupdate noanim"
+                    disabled>Up To Date</button
+                  >
+                {/if}
+              </div>
+            {/await}
+          </div>
+
+          {#if isAutoUpdating}
+            <div class="auto-update-info">
+              <div class="update-status">
+                <span>Auto-updating: {currentUpdating}</span>
+              </div>
+              {#if updateQueue.length > 0}
+                <div class="update-queue">
+                  <span
+                    >Update queue: {updateQueue.length} addon(s) pending</span
+                  >
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
-  </div>
+  {:else}
+    <div class="companion-content">
+      <section class="companion-panel">
+        <h2 class="panel-section-title">Companion</h2>
+        <p class="companion-help">
+          Officer-only: fetch raid roster and assignment notes into the
+          <code>NHFCompanion</code> addon. Generate an API key in the web app
+          under
+          <strong>Settings → External API</strong>.
+        </p>
+
+        {#if !wowFolder || !isRetailWowPath(wowFolder)}
+          <p class="companion-warning">
+            Set a valid WoW folder in Addon Manager first (must end with
+            <code>_retail_</code>).
+          </p>
+        {/if}
+
+        <div class="input">
+          <label for="external_api_key">External API key</label>
+          <input
+            type="password"
+            name="external_api_key"
+            id="external_api_key"
+            bind:value={externalApiKey}
+            onchange={updateExternalApiKey}
+            placeholder="nhf_..."
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="input">
+          <label for="companion_season_id">Season</label>
+          <select
+            id="companion_season_id"
+            name="companion_season_id"
+            bind:value={companionSeasonId}
+            onchange={updateCompanionSeasonId}
+            disabled={isSeasonsLoading ||
+              !externalApiKey.trim() ||
+              companionSeasons.length === 0}
+          >
+            {#if isSeasonsLoading}
+              <option value="">Loading seasons…</option>
+            {:else if companionSeasons.length === 0}
+              <option value="">Enter API key to load seasons</option>
+            {:else}
+              {#each companionSeasons as season (season.id)}
+                <option value={season.id}>
+                  {season.expansion} — {season.name}{season.id ===
+                  companionCurrentSeasonId
+                    ? " (current)"
+                    : ""}
+                </option>
+              {/each}
+            {/if}
+          </select>
+          {#if seasonsLoadError}
+            <p class="companion-season-error">{seasonsLoadError}</p>
+          {/if}
+        </div>
+
+        <div class="companion-actions">
+          <button
+            type="button"
+            class="companion-fetch-btn"
+            disabled={!canFetchCompanion}
+            onclick={fetchCompanionData}
+          >
+            {#if isCompanionFetching}
+              <LoaderCircle
+                size={14}
+                strokeWidth={2.25}
+                aria-hidden="true"
+                class="companion-fetch-icon-spin"
+              />
+              <span>Fetching…</span>
+            {:else}
+              <Download size={14} strokeWidth={2.25} aria-hidden="true" />
+              <span>Fetch Data</span>
+            {/if}
+          </button>
+        </div>
+
+        <div class="companion-meta">
+          {#if companionLastFetch}
+            <p class="companion-status">
+              Last fetch: {new Date(companionLastFetch).toLocaleString()}
+            </p>
+          {/if}
+
+          <p class="companion-output-path">
+            Writes to
+            <code>{wowFolder || "…"}/Interface/AddOns/NHFCompanion/</code>
+          </p>
+        </div>
+      </section>
+    </div>
+  {/if}
 
   <div
     class="install-dock-panel"
@@ -1704,18 +1967,37 @@
   }
 
   main {
-    --app-bg: #0c0e14;
-    --surface-0: rgba(22, 26, 36, 0.92);
-    --surface-1: rgba(30, 35, 48, 0.95);
-    --surface-2: rgba(38, 44, 60, 0.98);
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.12);
-    --text: #e8eaef;
-    --text-muted: #9aa3b5;
-    --text-subtle: #6b7289;
-    --accent: #5b8def;
-    --accent-soft: rgba(91, 141, 239, 0.18);
-    --accent-ring: rgba(91, 141, 239, 0.45);
+    --very-dark: #0f0f0f;
+    --dark: #191516;
+    --header-bg: #282223;
+    --border-color: #292224;
+    --gray-light: #5b626e;
+    --light: #eeeeee;
+    --accent: #ab2346;
+    --accent-light: #e73361;
+    --accent-dark: #8a1c38;
+
+    --app-bg: var(--very-dark);
+    --surface-0: rgba(25, 21, 22, 0.96);
+    --surface-1: rgba(40, 34, 35, 0.95);
+    --surface-2: rgba(41, 34, 36, 0.98);
+    --surface-panel: rgba(40, 34, 35, 0.72);
+    --border: var(--border-color);
+    --border-strong: #352d30;
+    --text: var(--light);
+    --text-muted: var(--gray-light);
+    --text-subtle: #4a4f58;
+    --accent-soft: rgba(171, 35, 70, 0.18);
+    --accent-ring: rgba(171, 35, 70, 0.45);
+    --accent-glow: rgba(171, 35, 70, 0.38);
+    --btn-primary-bg: linear-gradient(
+      180deg,
+      var(--accent-light) 0%,
+      var(--accent) 52%,
+      var(--accent-dark) 100%
+    );
+    --btn-primary-shadow: 0 4px 14px rgba(171, 35, 70, 0.32);
+    --btn-primary-shadow-hover: 0 6px 20px rgba(171, 35, 70, 0.42);
     --success: #34c759;
     --success-muted: rgba(52, 199, 89, 0.16);
     --danger: #ff5c5c;
@@ -1744,10 +2026,15 @@
     border: 1px solid rgba(0, 0, 0, 0.55);
     background: radial-gradient(
         ellipse 120% 80% at 50% -20%,
-        rgba(91, 141, 239, 0.12),
+        rgba(171, 35, 70, 0.14),
         transparent 55%
       ),
-      linear-gradient(165deg, #0c0e14 0%, #12151f 45%, #0a0c12 100%);
+      linear-gradient(
+        165deg,
+        var(--very-dark) 0%,
+        var(--dark) 45%,
+        #120f10 100%
+      );
     /* No outer blur: OS + WebView2 often composite it as a square on transparent windows. */
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   }
@@ -1775,8 +2062,8 @@
   .notification.error {
     background: linear-gradient(
       135deg,
-      rgba(180, 48, 58, 0.95),
-      rgba(130, 32, 42, 0.92)
+      rgba(171, 35, 70, 0.96),
+      rgba(138, 28, 56, 0.94)
     );
     color: #fff;
   }
@@ -1841,7 +2128,7 @@
     justify-content: space-between;
     min-height: 38px;
     margin: -16px -24px 18px -24px;
-    background: rgba(12, 14, 20, 0.97);
+    background: rgba(40, 34, 35, 0.97);
     border-bottom: 1px solid var(--border);
     user-select: none;
   }
@@ -1920,6 +2207,187 @@
     color: #fff !important;
   }
 
+  .view-nav {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    gap: 2px;
+    margin: 0 0 10px;
+    padding: 2px;
+    background: rgba(25, 21, 22, 0.72);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    width: fit-content;
+    max-width: 100%;
+  }
+
+  .view-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    line-height: 1;
+    transition:
+      background 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .view-nav-btn :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .view-nav-btn:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .view-nav-btn-active {
+    color: var(--text);
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 1px var(--accent-ring);
+  }
+
+  .companion-content {
+    position: relative;
+    z-index: 1;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
+  .companion-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface-panel);
+    backdrop-filter: blur(20px) saturate(1.4);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    border-radius: var(--radius-lg);
+    padding: 20px 22px 22px;
+    border: 1px solid var(--border);
+    min-height: 0;
+    overflow: auto;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+      0 0 32px rgba(0, 0, 0, 0.28);
+  }
+
+  .companion-help,
+  .companion-warning,
+  .companion-status,
+  .companion-output-path {
+    margin: 0 0 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-muted);
+  }
+
+  .companion-actions {
+    flex: 0 0 auto;
+    margin: 2px 0 14px;
+  }
+
+  .companion-meta {
+    flex: 0 0 auto;
+    margin-top: auto;
+    padding-top: 4px;
+  }
+
+  .companion-meta .companion-status,
+  .companion-meta .companion-output-path {
+    margin-bottom: 8px;
+  }
+
+  .companion-meta .companion-output-path:last-child {
+    margin-bottom: 0;
+  }
+
+  .companion-warning {
+    color: #ffb347;
+    padding: 10px 12px;
+    background: rgba(255, 179, 71, 0.1);
+    border: 1px solid rgba(255, 179, 71, 0.25);
+    border-radius: var(--radius-sm);
+  }
+
+  .companion-help code,
+  .companion-output-path code {
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .companion-fetch-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    width: 100%;
+    min-height: 0;
+    height: auto;
+    margin: 0;
+    padding: 12px 16px;
+    font-weight: 600;
+    font-size: 12px;
+    line-height: 1;
+    font-family: var(--font);
+    color: var(--light);
+    background: var(--btn-primary-bg);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.1) inset,
+      var(--btn-primary-shadow);
+    transition:
+      filter 0.2s ease,
+      transform 0.15s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .companion-fetch-btn :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .companion-fetch-btn :global(.companion-fetch-icon-spin) {
+    animation: companion-spin 0.75s linear infinite;
+  }
+
+  @keyframes companion-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .companion-fetch-btn:hover:not(:disabled) {
+    filter: brightness(1.05);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.14) inset,
+      var(--btn-primary-shadow-hover);
+  }
+
+  .companion-fetch-btn:active:not(:disabled) {
+    transform: scale(0.995);
+  }
+
+  .companion-fetch-btn:disabled {
+    background: var(--surface-2);
+    color: var(--text-subtle);
+    border-color: var(--border);
+    box-shadow: none;
+    cursor: not-allowed;
+    filter: none;
+  }
+
   .main-content {
     position: relative;
     z-index: 1;
@@ -1942,19 +2410,19 @@
   .right-panel {
     display: flex;
     flex-direction: column;
-    background: rgba(28, 32, 44, 0.45);
+    background: var(--surface-panel);
     backdrop-filter: blur(20px) saturate(1.4);
     -webkit-backdrop-filter: blur(20px) saturate(1.4);
     border-radius: var(--radius-lg);
     padding: 20px 22px 22px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--border);
     min-height: 0;
     overflow: auto;
     box-shadow:
       0 0 0 1px rgba(255, 255, 255, 0.05) inset,
       0 8px 32px rgba(0, 0, 0, 0.28);
     scrollbar-width: thin;
-    scrollbar-color: rgba(91, 141, 239, 0.45) rgba(255, 255, 255, 0.06);
+    scrollbar-color: var(--accent-ring) rgba(255, 255, 255, 0.04);
   }
 
   .left-panel::-webkit-scrollbar,
@@ -1994,7 +2462,7 @@
 
   .left-panel::-webkit-scrollbar-thumb,
   .right-panel::-webkit-scrollbar-thumb {
-    background: rgba(91, 141, 239, 0.38);
+    background: rgba(171, 35, 70, 0.38);
     border-radius: 6px;
     border: 2px solid transparent;
     background-clip: padding-box;
@@ -2002,7 +2470,7 @@
 
   .left-panel::-webkit-scrollbar-thumb:hover,
   .right-panel::-webkit-scrollbar-thumb:hover {
-    background: rgba(91, 141, 239, 0.58);
+    background: rgba(171, 35, 70, 0.58);
     border: 2px solid transparent;
     background-clip: padding-box;
   }
@@ -2140,6 +2608,30 @@
     font-size: 13px;
   }
 
+  .input select {
+    padding: 10px 14px;
+    font-weight: 500;
+    font-size: 13px;
+    font-family: var(--font);
+    color: var(--text);
+    background: var(--surface-0);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .input select:disabled {
+    color: var(--text-subtle);
+    cursor: not-allowed;
+    opacity: 0.75;
+  }
+
+  .companion-season-error {
+    margin: 0;
+    font-size: 12px;
+    color: var(--danger);
+  }
+
   .folder-picker-row {
     display: flex;
     align-items: stretch;
@@ -2257,7 +2749,7 @@
   .install-dock-fill {
     height: 100%;
     border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent), #8ab4ff);
+    background: linear-gradient(90deg, var(--accent), var(--accent-light));
     transition: width 0.22s ease-out;
     min-width: 0;
   }
@@ -2317,7 +2809,7 @@
 
   .server-footer-state {
     font-weight: 600;
-    color: #c93c4f;
+    color: var(--accent);
   }
 
   .server-footer-state.online {
@@ -2333,9 +2825,9 @@
     width: 9px;
     height: 9px;
     flex-shrink: 0;
-    background: #c93c4f;
+    background: var(--accent);
     border-radius: 50%;
-    box-shadow: 0 0 0 2px rgba(201, 60, 79, 0.25);
+    box-shadow: 0 0 0 2px var(--accent-soft);
   }
 
   .dot.green {
@@ -2344,8 +2836,8 @@
   }
 
   .dot.gray {
-    background: #5c6270;
-    box-shadow: 0 0 0 2px rgba(92, 98, 112, 0.2);
+    background: var(--gray-light);
+    box-shadow: 0 0 0 2px rgba(91, 98, 110, 0.2);
   }
 
   input {
@@ -2411,7 +2903,7 @@
     margin-bottom: 8px;
     padding: 12px 14px;
     background: var(--accent-soft);
-    border: 1px solid rgba(91, 141, 239, 0.28);
+    border: 1px solid rgba(171, 35, 70, 0.28);
     border-radius: var(--radius-sm);
   }
 
@@ -2464,7 +2956,7 @@
     margin-top: 10px;
     background: linear-gradient(135deg, #2d9f5e 0%, #248a52 100%);
     color: #fff;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 10px 16px;
     font-weight: 600;
@@ -2572,12 +3064,12 @@
     font-weight: 600;
     font-size: 13px;
     border-radius: var(--radius-sm);
-    color: #f4f7ff;
-    background: linear-gradient(180deg, #6a9af0 0%, #4a7fd4 52%, #3d6fc4 100%);
-    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: var(--light);
+    background: var(--btn-primary-bg);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow:
-      0 1px 0 rgba(255, 255, 255, 0.12) inset,
-      0 4px 14px rgba(61, 111, 196, 0.35);
+      0 1px 0 rgba(255, 255, 255, 0.1) inset,
+      var(--btn-primary-shadow);
     transition:
       transform 0.15s ease,
       box-shadow 0.2s ease,
@@ -2588,8 +3080,8 @@
   .action-buttons button.clientupdate:hover:not(:disabled) {
     filter: brightness(1.05);
     box-shadow:
-      0 1px 0 rgba(255, 255, 255, 0.16) inset,
-      0 6px 20px rgba(61, 111, 196, 0.45);
+      0 1px 0 rgba(255, 255, 255, 0.14) inset,
+      var(--btn-primary-shadow-hover);
   }
 
   .action-buttons .button-group > button:active:not(:disabled),
@@ -2597,15 +3089,40 @@
     transform: scale(0.99);
   }
 
+  /* Up to date — secondary reinstall action */
+  .action-buttons .button-group > button.btn-reinstall:not(:disabled) {
+    color: var(--text-muted);
+    background: var(--surface-1);
+    border: 1px solid var(--border-strong);
+    box-shadow: none;
+    filter: none;
+  }
+
+  .action-buttons .button-group > button.btn-reinstall:hover:not(:disabled) {
+    color: var(--light);
+    background: var(--header-bg);
+    border-color: rgba(171, 35, 70, 0.32);
+    box-shadow: none;
+    filter: none;
+  }
+
+  .action-buttons .button-group > button.btn-reinstall:active:not(:disabled) {
+    background: var(--surface-2);
+  }
+
   /* Update available — attention without rainbow */
   .action-buttons .button-group > button.glowing:not(:disabled),
   .action-buttons button.clientupdate.glowing:not(:disabled) {
-    color: #0d1118;
-    background: linear-gradient(180deg, #fff 0%, #e8eef9 100%);
-    border-color: rgba(91, 141, 239, 0.55);
+    color: var(--light);
+    background: linear-gradient(
+      180deg,
+      var(--accent-light) 0%,
+      var(--accent) 100%
+    );
+    border-color: var(--accent-ring);
     box-shadow:
-      0 0 0 1px rgba(91, 141, 239, 0.35),
-      0 0 28px rgba(91, 141, 239, 0.4);
+      0 0 0 1px var(--accent-soft),
+      0 0 28px var(--accent-glow);
     animation: accentPulse 2.2s ease-in-out infinite;
   }
 
@@ -2613,13 +3130,13 @@
     0%,
     100% {
       box-shadow:
-        0 0 0 1px rgba(91, 141, 239, 0.35),
-        0 0 22px rgba(91, 141, 239, 0.32);
+        0 0 0 1px var(--accent-soft),
+        0 0 22px rgba(171, 35, 70, 0.3);
     }
     50% {
       box-shadow:
-        0 0 0 1px rgba(91, 141, 239, 0.55),
-        0 0 36px rgba(91, 141, 239, 0.5);
+        0 0 0 1px var(--accent-ring),
+        0 0 36px rgba(171, 35, 70, 0.48);
     }
   }
 

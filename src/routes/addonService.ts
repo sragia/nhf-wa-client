@@ -75,6 +75,10 @@ export async function getZipInfo(filePath: string): Promise<any> {
     }
 }
 
+export async function writeTextFile(filePath: string, contents: string): Promise<void> {
+    await invoke('write_file', { filePath, contents });
+}
+
 export async function validateAndExtractZip(filePath: string, destination: string): Promise<void> {
     try {
         await invoke('validate_zip', { filePath });
