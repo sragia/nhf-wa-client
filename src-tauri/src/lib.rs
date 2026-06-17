@@ -71,7 +71,13 @@ fn extract_zip(file_path: String, destination: String) -> Result<(), String> {
         let mut file = archive
             .by_index(i)
             .map_err(|e| format!("Failed to read file {} from ZIP: {}", i, e))?;
-        let out_path = Path::new(&destination).join(file.name());
+        let Some(safe_name) = file.enclosed_name() else {
+            return Err(format!(
+                "ZIP entry {} has an unsafe path and was rejected",
+                i
+            ));
+        };
+        let out_path = destination_path.join(safe_name);
 
         if file.is_dir() {
             std::fs::create_dir_all(&out_path)
