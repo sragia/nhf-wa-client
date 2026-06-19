@@ -79,6 +79,14 @@ export async function writeTextFile(filePath: string, contents: string): Promise
     await invoke('write_file', { filePath, contents });
 }
 
+export async function writeBinaryFile(filePath: string, contents: Uint8Array): Promise<void> {
+    await invoke('write_binary_file', { filePath, contents: Array.from(contents) });
+}
+
+export async function clearDirectory(filePath: string): Promise<void> {
+    await invoke('clear_directory', { filePath });
+}
+
 export async function validateAndExtractZip(filePath: string, destination: string): Promise<void> {
     try {
         await invoke('validate_zip', { filePath });

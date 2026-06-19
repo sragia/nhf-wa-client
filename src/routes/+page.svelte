@@ -846,7 +846,7 @@
       }
 
       showNotification(
-        `Companion data written (${result.bossCount} bosses, season ${result.seasonId}). /reload in WoW to load.`,
+        `Companion data written (${result.bossCount} bosses, ${result.imageCount} images, season ${result.seasonId}). /reload in WoW to load.`,
         "success",
       );
     } catch (e) {

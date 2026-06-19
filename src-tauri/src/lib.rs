@@ -185,6 +185,24 @@ fn write_file(file_path: String, contents: String) -> Result<(), String> {
     fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn write_binary_file(file_path: String, contents: Vec<u8>) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_directory(file_path: String) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+    if path.exists() {
+        fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(&path).map_err(|e| e.to_string())
+}
+
 #[derive(Serialize, Deserialize)]
 struct BackupProgress {
     progress: u32,
@@ -754,6 +772,8 @@ pub fn run() {
             extract_zip,
             read_file,
             write_file,
+            write_binary_file,
+            clear_directory,
             validate_zip,
             get_zip_info,
             backup_weakauras,

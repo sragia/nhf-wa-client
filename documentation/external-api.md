@@ -147,11 +147,12 @@ curl -s \
       "bossId": "boss-uuid",
       "bossName": "Fyrakk",
       "journalEncounterId": 12345,
+      "imageUrl": "https://your-host/images/chimaerus.png",
       "slots": [
         {
           "playerId": "...",
           "characterId": "...",
-          "playerName": "PlayerName",
+          "playerName": "CharName",
           "className": "Mage",
           "spec": "Fire"
         }
@@ -163,8 +164,7 @@ curl -s \
         "groups": [
           [
             {
-              "playerName": "PlayerName",
-              "characterName": "CharName",
+              "playerName": "CharName",
               "className": "Mage",
               "spec": "Fire"
             },
@@ -172,13 +172,13 @@ curl -s \
           ]
         ],
         "raidLeader": {
-          "playerName": "RaidLead",
+          "playerName": "RaidLeadChar",
           "className": "Warrior",
           "spec": "Protection"
         },
         "raidAssistants": [
           {
-            "playerName": "Assist",
+            "playerName": "AssistChar",
             "linkedTo": {
               "componentId": "comp-uuid",
               "componentTitle": "Groups",
@@ -197,7 +197,9 @@ curl -s \
 #### Notes
 
 - If no roster exists for the season, `roster` is `null` and `bosses` is `[]`.
+- **`imageUrl`** is a full absolute URL to the boss portrait (`/images/…` on the app host), resolved from the linked journal boss (via `dungeonEncounterId` / encounter map). Empty string when no image is available. Custom roster `imageUrl` values are returned as absolute URLs when set.
 - **`groupSetup`** is included when the linked assignment has group setup data (including partial setups). Empty slots are `{}`. Linked slots include `linkedTo` instead of (or in addition to) resolved player fields.
+- **`playerName`** on slots, bench, group setup, and PI assignments is always the **character name** (or `customText` when manually entered). Account/player names are not exposed in this field.
 - **`groupCount`** is `4` for Mythic assignments, `6` otherwise (matches in-app group setup).
 - Secret boss filtering from the raider UI does **not** apply — API keys are officer-managed and receive full roster data.
 
