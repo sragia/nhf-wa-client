@@ -66,6 +66,7 @@ export interface CompanionFetchResult {
     bossCount: number;
     imageCount: number;
     fetchedAt: string;
+    dataLua: string;
 }
 
 const COMPANION_INTERFACE_PATH = `Interface/Addons/${NHF_COMPANION_ADDON_NAME}`;
@@ -299,5 +300,6 @@ export async function fetchAndWriteCompanionAddon(
         bossCount: rosterBosses.length,
         imageCount: imageInfoByBossId.size,
         fetchedAt,
+        dataLua,
     };
 }

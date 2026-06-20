@@ -188,6 +188,34 @@ curl -s \
           }
         ]
       },
+      "reminders": [
+        {
+          "forEveryone": false,
+          "players": [
+            {
+              "playerName": "CharName",
+              "className": "Mage",
+              "spec": "Fire"
+            }
+          ],
+          "mainText": "Soak left",
+          "subText": "Group 1",
+          "iconFileId": 4638520
+        },
+        {
+          "forEveryone": true,
+          "players": [],
+          "mainText": "Stack for mechanic",
+          "iconFileId": 136243
+        },
+        {
+          "forEveryone": false,
+          "roles": ["tank", "healer"],
+          "players": [],
+          "mainText": "Use defensives",
+          "subText": "Phase 2"
+        }
+      ],
       "assignmentId": "assignment-uuid"
     }
   ]
@@ -199,6 +227,10 @@ curl -s \
 - If no roster exists for the season, `roster` is `null` and `bosses` is `[]`.
 - **`imageUrl`** is a full absolute URL to the boss portrait (`/images/…` on the app host), resolved from the linked journal boss (via `dungeonEncounterId` / encounter map). Empty string when no image is available. Custom roster `imageUrl` values are returned as absolute URLs when set.
 - **`groupSetup`** is included when the linked assignment has group setup data (including partial setups). Empty slots are `{}`. Linked slots include `linkedTo` instead of (or in addition to) resolved player fields.
+- **`reminders`** is included when the primary linked assignment has reminder data. Each reminder has **`mainText`**, optional **`subText`**, and optional **`iconFileId`** (WoW icon file data ID from the journal). Audience targeting:
+  - **`forEveryone: true`** — reminder applies to everyone; **`players`** is `[]`.
+  - **`roles`** — optional array of `"tank"`, `"healer"`, and/or `"dps"` when targeting by role; **`players`** is `[]`.
+  - Otherwise — **`forEveryone: false`** with resolved **`players`** (character names only — no component or link IDs), each with optional **`className`** and **`spec`**.
 - **`playerName`** on slots, bench, group setup, and PI assignments is always the **character name** (or `customText` when manually entered). Account/player names are not exposed in this field.
 - **`groupCount`** is `4` for Mythic assignments, `6` otherwise (matches in-app group setup).
 - Secret boss filtering from the raider UI does **not** apply — API keys are officer-managed and receive full roster data.

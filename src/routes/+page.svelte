@@ -79,6 +79,7 @@
   let isSeasonsLoading = $state(false);
   let seasonsLoadError = $state("");
   let companionLastFetch = $state("");
+  let companionSavedData = $state("");
   let isCompanionFetching = $state(false);
 
   type InstallDockPhase = "download" | "extract" | "backup";
@@ -829,6 +830,17 @@
       !isCompanionFetching,
   );
 
+  async function copyCompanionSavedData() {
+    if (!companionSavedData) return;
+
+    try {
+      await navigator.clipboard.writeText(companionSavedData);
+      showNotification("Companion data copied to clipboard.", "success");
+    } catch {
+      showNotification("Failed to copy to clipboard.", "error");
+    }
+  }
+
   async function fetchCompanionData() {
     if (!canFetchCompanion) return;
 
@@ -841,6 +853,7 @@
       );
 
       companionLastFetch = result.fetchedAt;
+      companionSavedData = result.dataLua;
       if (store) {
         await store.set("companion_last_fetch", result.fetchedAt);
       }
@@ -1879,6 +1892,23 @@
           </button>
         </div>
 
+        <div class="companion-data-preview">
+          <label for="companion_saved_data">Saved companion data</label>
+          <textarea
+            id="companion_saved_data"
+            readonly
+            class="companion-data-textarea"
+            class:companion-data-textarea-empty={!companionSavedData}
+            value={companionSavedData}
+            placeholder="Fetch data to preview the saved Data.lua content…"
+            title={companionSavedData ? "Click to copy to clipboard" : undefined}
+            onclick={copyCompanionSavedData}
+          ></textarea>
+          {#if companionSavedData}
+            <p class="companion-data-hint">Click to copy to clipboard</p>
+          {/if}
+        </div>
+
         <div class="companion-meta">
           {#if companionLastFetch}
             <p class="companion-status">
@@ -2261,6 +2291,7 @@
     z-index: 1;
     flex: 1;
     min-height: 0;
+    min-width: 0;
     display: flex;
   }
 
@@ -2275,6 +2306,7 @@
     padding: 20px 22px 22px;
     border: 1px solid var(--border);
     min-height: 0;
+    min-width: 0;
     overflow: auto;
     box-shadow:
       0 0 0 1px rgba(255, 255, 255, 0.05) inset,
@@ -2296,10 +2328,72 @@
     margin: 2px 0 14px;
   }
 
+  .companion-data-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 16px;
+    min-height: 0;
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .companion-data-preview label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .companion-data-textarea {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 100px;
+    max-height: 160px;
+    padding: 10px 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--surface-0);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    resize: vertical;
+    overflow-x: auto;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    cursor: pointer;
+    transition:
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .companion-data-textarea-empty {
+    cursor: default;
+  }
+
+  .companion-data-textarea:not(.companion-data-textarea-empty):hover {
+    border-color: var(--accent-ring);
+  }
+
+  .companion-data-textarea:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .companion-data-hint {
+    margin: 0 0 2px;
+    font-size: 12px;
+    color: var(--text-subtle);
+  }
+
   .companion-meta {
     flex: 0 0 auto;
-    margin-top: auto;
-    padding-top: 4px;
+    padding-top: 0;
   }
 
   .companion-meta .companion-status,
